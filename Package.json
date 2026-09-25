@@ -1,0 +1,12 @@
+{
+  "name": "xau-ai-bot",
+  "version": "1.0.0",
+  "description": "AI Gold Trading Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "openai": "^5.12.0"
+  }
+}
