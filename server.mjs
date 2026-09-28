@@ -80,7 +80,7 @@ ${JSON.stringify(marketData)}
 `;
 
     const response = await client.responses.create({
-      model: "gpt-5.5",
+      model: "gpt-5.6",
       tools: [
         {
           type: "web_search"
