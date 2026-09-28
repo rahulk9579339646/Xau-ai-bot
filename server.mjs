@@ -1,6 +1,7 @@
 import express from "express";
 
 const app = express();
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -10,71 +11,30 @@ const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 
 const SYMBOL = "XAU/USD";
 
-// =====================================================
+
+// ============================================================
 // BASIC
-// =====================================================
+// ============================================================
 
 app.get("/", (req, res) => {
   res.send("XAU AI BOT IS ONLINE");
 });
 
-// =====================================================
-// GEMINI TEST
-// =====================================================
 
-app.get("/gemini-test", async (req, res) => {
-  try {
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/interactions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": GEMINI_API_KEY
-        },
-        body: JSON.stringify({
-          model: "gemini-3.8-flash",
-          input: "Reply with exactly: GEMINI CONNECTION OK"
-        })
-      }
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(502).json(data);
-    }
-
-    const answer =
-      data.steps
-        ?.find(s => s.type === "model_output")
-        ?.content
-        ?.find(c => c.type === "text")
-        ?.text || "No output returned";
-
-    res.json({
-      success: true,
-      answer
-    });
-
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// =====================================================
-// TWELVE DATA
-// =====================================================
+// ============================================================
+// TWELVE DATA - GOLD CANDLES
+// ============================================================
 
 async function getGoldCandles(interval = "5min", outputsize = 200) {
-  const response = await fetch(
-    `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(
-      SYMBOL
-    )}&interval=${interval}&outputsize=${outputsize}&apikey=${TWELVE_DATA_API_KEY}`
-  );
+
+  const url =
+    `https://api.twelvedata.com/time_series` +
+    `?symbol=${encodeURIComponent(SYMBOL)}` +
+    `&interval=${interval}` +
+    `&outputsize=${outputsize}` +
+    `&apikey=${TWELVE_DATA_API_KEY}`;
+
+  const response = await fetch(url);
 
   const data = await response.json();
 
@@ -85,7 +45,7 @@ async function getGoldCandles(interval = "5min", outputsize = 200) {
   }
 
   if (!data.values || !Array.isArray(data.values)) {
-    throw new Error("No candle data returned");
+    throw new Error("No candle data returned from Twelve Data");
   }
 
   return data.values
@@ -96,54 +56,70 @@ async function getGoldCandles(interval = "5min", outputsize = 200) {
       low: Number(c.low),
       close: Number(c.close),
       volume:
-        c.volume !== undefined &&
-        c.volume !== null &&
-        c.volume !== ""
+        c.volume !== undefined
           ? Number(c.volume)
           : null
     }))
     .reverse();
 }
 
-// =====================================================
-// EMA
-// =====================================================
+
+// ============================================================
+// MATH HELPERS
+// ============================================================
 
 function calculateEMA(values, period) {
-  if (values.length < period) return null;
+
+  if (values.length < period) {
+    return null;
+  }
 
   const multiplier = 2 / (period + 1);
 
   let ema =
     values
       .slice(0, period)
-      .reduce((a, b) => a + b, 0) / period;
+      .reduce((sum, value) => sum + value, 0) /
+    period;
 
   for (let i = period; i < values.length; i++) {
+
     ema =
-      (values[i] - ema) * multiplier + ema;
+      (values[i] - ema) * multiplier +
+      ema;
   }
 
   return ema;
 }
 
-function calculateEMASeries(values, period) {
-  if (values.length < period) return [];
+
+function calculateEMAArray(values, period) {
+
+  if (values.length < period) {
+    return [];
+  }
 
   const multiplier = 2 / (period + 1);
 
   let ema =
     values
       .slice(0, period)
-      .reduce((a, b) => a + b, 0) / period;
+      .reduce((sum, value) => sum + value, 0) /
+    period;
 
-  const result = Array(period - 1).fill(null);
+  const result = [];
+
+  for (let i = 0; i < period - 1; i++) {
+    result.push(null);
+  }
 
   result.push(ema);
 
   for (let i = period; i < values.length; i++) {
+
     ema =
-      (values[i] - ema) * multiplier + ema;
+      (values[i] - ema) * multiplier +
+      ema;
 
     result.push(ema);
   }
@@ -151,161 +127,191 @@ function calculateEMASeries(values, period) {
   return result;
 }
 
-// =====================================================
-// RSI
-// =====================================================
 
 function calculateRSI(values, period = 14) {
-  if (values.length <= period) return null;
+
+  if (values.length <= period) {
+    return null;
+  }
 
   let gains = 0;
   let losses = 0;
 
   for (let i = 1; i <= period; i++) {
-    const change = values[i] - values[i - 1];
 
-    if (change > 0) gains += change;
-    else losses += Math.abs(change);
+    const change =
+      values[i] - values[i - 1];
+
+    if (change > 0) {
+      gains += change;
+    } else {
+      losses += Math.abs(change);
+    }
   }
 
   let averageGain = gains / period;
   let averageLoss = losses / period;
 
   for (let i = period + 1; i < values.length; i++) {
-    const change = values[i] - values[i - 1];
 
-    const gain = change > 0 ? change : 0;
-    const loss = change < 0 ? Math.abs(change) : 0;
+    const change =
+      values[i] - values[i - 1];
+
+    const gain =
+      change > 0 ? change : 0;
+
+    const loss =
+      change < 0 ? Math.abs(change) : 0;
 
     averageGain =
-      (averageGain * (period - 1) + gain) /
-      period;
+      (
+        averageGain * (period - 1) +
+        gain
+      ) / period;
 
     averageLoss =
-      (averageLoss * (period - 1) + loss) /
-      period;
+      (
+        averageLoss * (period - 1) +
+        loss
+      ) / period;
   }
 
-  if (averageLoss === 0) return 100;
+  if (averageLoss === 0) {
+    return 100;
+  }
 
-  const rs = averageGain / averageLoss;
+  const rs =
+    averageGain / averageLoss;
 
-  return 100 - 100 / (1 + rs);
+  return 100 - (100 / (1 + rs));
 }
 
-// =====================================================
-// MACD 12 / 26 / 9
-// =====================================================
-
-function calculateMACD(values) {
-  const ema12 = calculateEMASeries(values, 12);
-  const ema26 = calculateEMASeries(values, 26);
-
-  const macdSeries = [];
-
-  for (let i = 0; i < values.length; i++) {
-    if (
-      ema12[i] !== null &&
-      ema26[i] !== null
-    ) {
-      macdSeries.push(
-        ema12[i] - ema26[i]
-      );
-    } else {
-      macdSeries.push(null);
-    }
-  }
-
-  const validMACD =
-    macdSeries.filter(v => v !== null);
-
-  const signalSeries =
-    calculateEMASeries(validMACD, 9);
-
-  const macdLine =
-    macdSeries[macdSeries.length - 1];
-
-  const signal =
-    signalSeries.length
-      ? signalSeries[signalSeries.length - 1]
-      : null;
-
-  const histogram =
-    macdLine !== null &&
-    signal !== null
-      ? macdLine - signal
-      : null;
-
-  let direction = "Neutral";
-
-  if (macdLine !== null && signal !== null) {
-    if (macdLine > signal)
-      direction = "Bullish";
-
-    if (macdLine < signal)
-      direction = "Bearish";
-  }
-
-  return {
-    MACDLine: macdLine,
-    signal,
-    histogram,
-    direction
-  };
-}
-
-// =====================================================
-// ATR
-// =====================================================
 
 function calculateATR(candles, period = 14) {
-  if (candles.length <= period) return null;
 
-  const tr = [];
+  if (candles.length <= period) {
+    return null;
+  }
+
+  const trueRanges = [];
 
   for (let i = 1; i < candles.length; i++) {
+
     const current = candles[i];
     const previous = candles[i - 1];
 
-    tr.push(
-      Math.max(
-        current.high - current.low,
-        Math.abs(
-          current.high - previous.close
-        ),
-        Math.abs(
-          current.low - previous.close
-        )
+    const tr = Math.max(
+      current.high - current.low,
+      Math.abs(
+        current.high - previous.close
+      ),
+      Math.abs(
+        current.low - previous.close
       )
     );
+
+    trueRanges.push(tr);
+  }
+
+  if (trueRanges.length < period) {
+    return null;
   }
 
   let atr =
-    tr.slice(0, period)
-      .reduce((a, b) => a + b, 0) / period;
+    trueRanges
+      .slice(0, period)
+      .reduce((a, b) => a + b, 0) /
+    period;
 
-  for (let i = period; i < tr.length; i++) {
+  for (
+    let i = period;
+    i < trueRanges.length;
+    i++
+  ) {
+
     atr =
-      (atr * (period - 1) + tr[i]) /
-      period;
+      (
+        atr * (period - 1) +
+        trueRanges[i]
+      ) / period;
   }
 
   return atr;
 }
 
-// =====================================================
-// SWINGS
-// =====================================================
 
-function findSwings(candles) {
-  const swingHighs = [];
-  const swingLows = [];
+// ============================================================
+// MACD
+// ============================================================
+
+function calculateMACD(values) {
+
+  const ema12 =
+    calculateEMAArray(values, 12);
+
+  const ema26 =
+    calculateEMAArray(values, 26);
+
+  const macdLine = [];
+
+  for (let i = 0; i < values.length; i++) {
+
+    if (
+      ema12[i] !== null &&
+      ema26[i] !== null
+    ) {
+      macdLine.push(
+        ema12[i] - ema26[i]
+      );
+    }
+  }
+
+  if (macdLine.length < 9) {
+
+    return {
+      line: null,
+      signal: null,
+      histogram: null
+    };
+  }
+
+  const signalArray =
+    calculateEMAArray(macdLine, 9);
+
+  const line =
+    macdLine[macdLine.length - 1];
+
+  const signal =
+    signalArray[signalArray.length - 1];
+
+  const histogram =
+    line !== null &&
+    signal !== null
+      ? line - signal
+      : null;
+
+  return {
+    line,
+    signal,
+    histogram
+  };
+}
+
+
+// ============================================================
+// SWING DETECTION
+// ============================================================
+
+function findSwingHighs(candles) {
+
+  const swings = [];
 
   for (
     let i = 2;
     i < candles.length - 2;
     i++
   ) {
+
     const c = candles[i];
 
     if (
@@ -314,11 +320,30 @@ function findSwings(candles) {
       c.high > candles[i + 1].high &&
       c.high > candles[i + 2].high
     ) {
-      swingHighs.push({
+
+      swings.push({
+        index: i,
         time: c.time,
         price: c.high
       });
     }
+  }
+
+  return swings;
+}
+
+
+function findSwingLows(candles) {
+
+  const swings = [];
+
+  for (
+    let i = 2;
+    i < candles.length - 2;
+    i++
+  ) {
+
+    const c = candles[i];
 
     if (
       c.low < candles[i - 1].low &&
@@ -326,462 +351,483 @@ function findSwings(candles) {
       c.low < candles[i + 1].low &&
       c.low < candles[i + 2].low
     ) {
-      swingLows.push({
+
+      swings.push({
+        index: i,
         time: c.time,
         price: c.low
       });
     }
   }
 
-  return {
-    swingHighs,
-    swingLows
-  };
+  return swings;
 }
 
-// =====================================================
-// MARKET STRUCTURE
-// =====================================================
 
-function calculateMarketStructure(
+// ============================================================
+// STRUCTURE
+// ============================================================
+
+function getStructure(
   swingHighs,
   swingLows
 ) {
+
   if (
     swingHighs.length < 2 ||
     swingLows.length < 2
   ) {
+
     return {
-      classification: "Insufficient data",
-      details: {}
+      structure: "Insufficient data",
+      HH: false,
+      HL: false,
+      LH: false,
+      LL: false
     };
   }
+
+  const h1 =
+    swingHighs[swingHighs.length - 2];
+
+  const h2 =
+    swingHighs[swingHighs.length - 1];
+
+  const l1 =
+    swingLows[swingLows.length - 2];
+
+  const l2 =
+    swingLows[swingLows.length - 1];
+
+  const HH = h2.price > h1.price;
+  const LH = h2.price < h1.price;
+
+  const HL = l2.price > l1.price;
+  const LL = l2.price < l1.price;
+
+  let structure = "Neutral";
+
+  if (HH && HL) {
+    structure = "Bullish Structure";
+  }
+
+  else if (LH && LL) {
+    structure = "Bearish Structure";
+  }
+
+  return {
+    structure,
+    HH,
+    HL,
+    LH,
+    LL
+  };
+}
+
+
+// ============================================================
+// BOS / CHoCH / MSS
+// ============================================================
+
+function detectStructureBreak(
+  closedCandle,
+  swingHighs,
+  swingLows,
+  structure
+) {
+
+  let BOS = "None";
+  let BOSReason = "";
+
+  let CHoCH = "None";
+  let CHoCHReason = "";
+
+  let MSS = "None";
+  let MSSReason = "";
 
   const latestHigh =
     swingHighs[swingHighs.length - 1];
 
-  const previousHigh =
-    swingHighs[swingHighs.length - 2];
-
   const latestLow =
     swingLows[swingLows.length - 1];
 
-  const previousLow =
-    swingLows[swingLows.length - 2];
-
-  const higherHigh =
-    latestHigh.price > previousHigh.price;
-
-  const lowerHigh =
-    latestHigh.price < previousHigh.price;
-
-  const higherLow =
-    latestLow.price > previousLow.price;
-
-  const lowerLow =
-    latestLow.price < previousLow.price;
-
-  let classification =
-    "Range / Mixed Structure";
-
-  if (higherHigh && higherLow)
-    classification = "Bullish Structure";
-
-  if (lowerHigh && lowerLow)
-    classification = "Bearish Structure";
-
-  return {
-    classification,
-    details: {
-      latestHigh,
-      previousHigh,
-      latestLow,
-      previousLow,
-      higherHigh,
-      lowerHigh,
-      higherLow,
-      lowerLow
-    }
-  };
-}
-
-// =====================================================
-// BOS
-// =====================================================
-
-function calculateBOS(
-  candles,
-  swingHighs,
-  swingLows
-) {
-  const latest =
-    candles[candles.length - 1];
-
-  const lastHigh =
-    swingHighs[swingHighs.length - 1];
-
-  const lastLow =
-    swingLows[swingLows.length - 1];
-
   if (
-    lastHigh &&
-    latest.close > lastHigh.price
+    latestHigh &&
+    closedCandle.close > latestHigh.price
   ) {
-    return {
-      signal: "Bullish BOS",
-      reason:
-        `Latest close ${latest.close} is above swing high ${lastHigh.price}`
-    };
+
+    BOS = "Bullish BOS";
+
+    BOSReason =
+      `Closed candle ${closedCandle.close.toFixed(2)} ` +
+      `closed above swing high ${latestHigh.price.toFixed(2)}`;
   }
 
-  if (
-    lastLow &&
-    latest.close < lastLow.price
+  else if (
+    latestLow &&
+    closedCandle.close < latestLow.price
   ) {
-    return {
-      signal: "Bearish BOS",
-      reason:
-        `Latest close ${latest.close} is below swing low ${lastLow.price}`
-    };
+
+    BOS = "Bearish BOS";
+
+    BOSReason =
+      `Closed candle ${closedCandle.close.toFixed(2)} ` +
+      `closed below swing low ${latestLow.price.toFixed(2)}`;
   }
 
-  return {
-    signal: "None",
-    reason: "No confirmed BOS"
-  };
-}
-
-// =====================================================
-// CHOCH + MSS
-// =====================================================
-
-function calculateCHoCHMSS(
-  candles,
-  swingHighs,
-  swingLows
-) {
-  const latest =
-    candles[candles.length - 1];
 
   if (
-    swingHighs.length < 2 ||
-    swingLows.length < 2
+    structure.structure === "Bearish Structure" &&
+    latestHigh &&
+    closedCandle.close > latestHigh.price
   ) {
-    return {
-      CHoCH: {
-        signal: "None",
-        reason: "Insufficient data"
-      },
-      MSS: {
-        signal: "None",
-        reason: "Insufficient data"
-      }
-    };
-  }
 
-  const lastHigh =
-    swingHighs[swingHighs.length - 1];
-
-  const previousHigh =
-    swingHighs[swingHighs.length - 2];
-
-  const lastLow =
-    swingLows[swingLows.length - 1];
-
-  const previousLow =
-    swingLows[swingLows.length - 2];
-
-  let CHoCH = "None";
-  let MSS = "None";
-
-  let chochReason =
-    "No confirmed CHoCH";
-
-  let mssReason =
-    "No confirmed MSS";
-
-  if (
-    lastLow.price < previousLow.price &&
-    latest.close > lastHigh.price
-  ) {
     CHoCH = "Bullish CHoCH";
+
+    CHoCHReason =
+      "Bearish structure was broken upward by a closed candle.";
+
     MSS = "Bullish MSS";
 
-    chochReason =
-      "Lower low followed by break above latest swing high.";
-
-    mssReason =
-      "Bearish structure followed by bullish break.";
+    MSSReason =
+      "Momentum shifted from bearish structure toward bullish structure.";
   }
 
+
   if (
-    lastHigh.price > previousHigh.price &&
-    latest.close < lastLow.price
+    structure.structure === "Bullish Structure" &&
+    latestLow &&
+    closedCandle.close < latestLow.price
   ) {
+
     CHoCH = "Bearish CHoCH";
+
+    CHoCHReason =
+      "Bullish structure was broken downward by a closed candle.";
+
     MSS = "Bearish MSS";
 
-    chochReason =
-      "Higher high followed by break below latest swing low.";
-
-    mssReason =
-      "Bullish structure followed by bearish break.";
+    MSSReason =
+      "Momentum shifted from bullish structure toward bearish structure.";
   }
 
   return {
-    CHoCH: {
-      signal: CHoCH,
-      reason: chochReason
-    },
-    MSS: {
-      signal: MSS,
-      reason: mssReason
-    }
+    BOS,
+    BOSReason,
+    CHoCH,
+    CHoCHReason,
+    MSS,
+    MSSReason
   };
 }
 
-// =====================================================
-// LIQUIDITY
-// =====================================================
 
-function calculateLiquidity(
-  candles,
+// ============================================================
+// LIQUIDITY
+// ============================================================
+
+function detectLiquidity(
+  closedCandle,
   swingHighs,
-  swingLows
+  swingLows,
+  atr
 ) {
-  const latest =
-    candles[candles.length - 1];
+
+  let buySideSweep = null;
+  let sellSideSweep = null;
+
+  const tolerance =
+    atr
+      ? atr * 0.15
+      : 0.5;
+
 
   const previousHigh =
-    swingHighs[swingHighs.length - 2];
+    swingHighs[swingHighs.length - 1];
 
   const previousLow =
-    swingLows[swingLows.length - 2];
+    swingLows[swingLows.length - 1];
 
-  let sweep = "None";
-
-  let sweepReason =
-    "No confirmed liquidity sweep.";
 
   if (
     previousHigh &&
-    latest.high > previousHigh.price &&
-    latest.close < previousHigh.price
+    closedCandle.high >
+      previousHigh.price &&
+    closedCandle.close <
+      previousHigh.price
   ) {
-    sweep = "Buy-side liquidity sweep";
 
-    sweepReason =
-      "Price swept a previous swing high and closed below it.";
+    buySideSweep = {
+      type: "Buy-side liquidity sweep",
+      level: previousHigh.price,
+      reason:
+        "Price traded above the swing high and closed back below it."
+    };
   }
+
 
   if (
     previousLow &&
-    latest.low < previousLow.price &&
-    latest.close > previousLow.price
+    closedCandle.low <
+      previousLow.price &&
+    closedCandle.close >
+      previousLow.price
   ) {
-    sweep = "Sell-side liquidity sweep";
 
-    sweepReason =
-      "Price swept a previous swing low and closed above it.";
+    sellSideSweep = {
+      type: "Sell-side liquidity sweep",
+      level: previousLow.price,
+      reason:
+        "Price traded below the swing low and closed back above it."
+    };
   }
 
-  const equalHighs = [];
-  const equalLows = [];
 
-  const tolerance =
-    latest.close * 0.00015;
+  function clusterLevels(items) {
 
-  for (
-    let i = 0;
-    i < swingHighs.length;
-    i++
-  ) {
-    for (
-      let j = i + 1;
-      j < swingHighs.length;
-      j++
-    ) {
-      if (
-        Math.abs(
-          swingHighs[i].price -
-          swingHighs[j].price
-        ) <= tolerance
-      ) {
-        equalHighs.push({
-          price:
-            (
-              swingHighs[i].price +
-              swingHighs[j].price
-            ) / 2,
-          firstTime:
-            swingHighs[i].time,
-          secondTime:
-            swingHighs[j].time,
-          type:
-            "Equal High Liquidity"
+    const levels = [];
+
+    for (const item of items) {
+
+      const existing =
+        levels.find(
+          level =>
+            Math.abs(
+              level.price - item.price
+            ) <= tolerance
+        );
+
+      if (existing) {
+        existing.count++;
+      } else {
+        levels.push({
+          price: item.price,
+          count: 1
         });
       }
     }
+
+    return levels
+      .filter(x => x.count >= 2)
+      .slice(-10);
   }
 
-  for (
-    let i = 0;
-    i < swingLows.length;
-    i++
-  ) {
-    for (
-      let j = i + 1;
-      j < swingLows.length;
-      j++
-    ) {
-      if (
-        Math.abs(
-          swingLows[i].price -
-          swingLows[j].price
-        ) <= tolerance
-      ) {
-        equalLows.push({
-          price:
-            (
-              swingLows[i].price +
-              swingLows[j].price
-            ) / 2,
-          firstTime:
-            swingLows[i].time,
-          secondTime:
-            swingLows[j].time,
-          type:
-            "Equal Low Liquidity"
-        });
-      }
-    }
-  }
+
+  const equalHighs =
+    clusterLevels(
+      swingHighs.slice(-20)
+    );
+
+  const equalLows =
+    clusterLevels(
+      swingLows.slice(-20)
+    );
+
 
   return {
-    sweep,
-    sweepReason,
-    equalHighs: equalHighs.slice(-10),
-    equalLows: equalLows.slice(-10)
+    equalHighs,
+    equalLows,
+    latestSweep:
+      buySideSweep ||
+      sellSideSweep ||
+      null
   };
 }
 
-// =====================================================
-// PRICE ACTION + CANDLE PATTERNS
-// =====================================================
 
-function calculatePriceAction(candles) {
-  const latest =
-    candles[candles.length - 1];
+// ============================================================
+// CANDLESTICK
+// ============================================================
 
-  const previous =
-    candles[candles.length - 2];
+function detectCandlestick(candle) {
 
   const range =
-    latest.high - latest.low;
+    candle.high - candle.low;
 
   const body =
     Math.abs(
-      latest.close - latest.open
+      candle.close - candle.open
     );
 
   const upperWick =
-    latest.high -
+    candle.high -
     Math.max(
-      latest.open,
-      latest.close
+      candle.open,
+      candle.close
     );
 
   const lowerWick =
     Math.min(
-      latest.open,
-      latest.close
+      candle.open,
+      candle.close
     ) -
-    latest.low;
+    candle.low;
 
-  let candleStrength = "Normal";
+  if (range <= 0) {
 
-  if (range > 0) {
-    const ratio = body / range;
-
-    if (ratio >= 0.70)
-      candleStrength =
-        "Strong Displacement";
-    else if (ratio >= 0.50)
-      candleStrength = "Moderate";
-    else
-      candleStrength =
-        "Weak / Indecision";
+    return {
+      patterns: [],
+      strength: "Invalid"
+    };
   }
 
-  const candleDirection =
-    latest.close > latest.open
-      ? "Bullish"
-      : latest.close < latest.open
-        ? "Bearish"
-        : "Doji";
+  const bodyRatio =
+    body / range;
+
+  const upperRatio =
+    upperWick / range;
+
+  const lowerRatio =
+    lowerWick / range;
 
   const patterns = [];
 
-  if (
-    range > 0 &&
-    body / range <= 0.10
-  ) {
+
+  if (bodyRatio < 0.15) {
     patterns.push("Doji");
   }
 
-  if (
-    previous.close < previous.open &&
-    latest.close > latest.open &&
-    latest.open <= previous.close &&
-    latest.close >= previous.open
-  ) {
-    patterns.push("Bullish Engulfing");
-  }
 
   if (
-    previous.close > previous.open &&
-    latest.close < latest.open &&
-    latest.open >= previous.close &&
-    latest.close <= previous.open
+    lowerRatio >= 0.55 &&
+    upperRatio <= 0.20
   ) {
-    patterns.push("Bearish Engulfing");
-  }
 
-  if (
-    lowerWick > body * 2 &&
-    upperWick <= body
-  ) {
     patterns.push("Bullish Pin Bar");
   }
 
+
   if (
-    upperWick > body * 2 &&
-    lowerWick <= body
+    upperRatio >= 0.55 &&
+    lowerRatio <= 0.20
   ) {
+
     patterns.push("Bearish Pin Bar");
   }
 
-  if (!patterns.length)
-    patterns.push(
-      "No major pattern detected"
-    );
+
+  if (
+    candle.close > candle.open &&
+    bodyRatio >= 0.70
+  ) {
+
+    patterns.push("Bullish Strong Body");
+  }
+
+
+  if (
+    candle.close < candle.open &&
+    bodyRatio >= 0.70
+  ) {
+
+    patterns.push("Bearish Strong Body");
+  }
+
+
+  let strength = "Weak / Indecision";
+
+  if (bodyRatio >= 0.70) {
+    strength = "Strong";
+  }
+
+  else if (bodyRatio >= 0.50) {
+    strength = "Moderate";
+  }
+
 
   return {
-    candleDirection,
-    candleStrength,
-    range,
+    patterns,
+    strength,
     body,
+    range,
     upperWick,
-    lowerWick,
-    patterns
+    lowerWick
   };
 }
 
-// =====================================================
-// FVG
-// =====================================================
 
-function calculateFVG(candles) {
+// ============================================================
+// DISPLACEMENT
+// ============================================================
+
+function detectDisplacement(
+  candles,
+  closedIndex,
+  atr
+) {
+
+  if (
+    closedIndex < 3 ||
+    !atr
+  ) {
+
+    return {
+      type: "None",
+      reason: "Insufficient data"
+    };
+  }
+
+  const candle =
+    candles[closedIndex];
+
+  const range =
+    candle.high - candle.low;
+
+  const body =
+    Math.abs(
+      candle.close - candle.open
+    );
+
+  const bodyRatio =
+    range > 0
+      ? body / range
+      : 0;
+
+  const direction =
+    candle.close > candle.open
+      ? "Bullish"
+      : candle.close < candle.open
+        ? "Bearish"
+        : "Neutral";
+
+
+  // True displacement requires:
+  // 1. reasonably large range
+  // 2. strong body
+  // 3. direction
+  if (
+    range >= atr * 1.2 &&
+    bodyRatio >= 0.65
+  ) {
+
+    return {
+      type:
+        direction === "Bullish"
+          ? "Bullish Displacement"
+          : "Bearish Displacement",
+
+      reason:
+        `${direction} candle range (${range.toFixed(2)}) ` +
+        `is >= 1.2 ATR (${atr.toFixed(2)}) ` +
+        `with ${(bodyRatio * 100).toFixed(1)}% body ratio.`
+    };
+  }
+
+
+  return {
+    type: "None",
+    reason:
+      "Candle does not meet ATR and body-ratio displacement requirements."
+  };
+}
+
+
+// ============================================================
+// FVG
+// ============================================================
+
+function detectFVG(candles) {
+
   const bullish = [];
   const bearish = [];
 
@@ -790,15 +836,18 @@ function calculateFVG(candles) {
     i < candles.length;
     i++
   ) {
+
     const first =
       candles[i - 2];
 
     const third =
       candles[i];
 
+
     if (
       third.low > first.high
     ) {
+
       bullish.push({
         time: third.time,
         type: "Bullish FVG",
@@ -807,9 +856,11 @@ function calculateFVG(candles) {
       });
     }
 
+
     if (
       third.high < first.low
     ) {
+
       bearish.push({
         time: third.time,
         type: "Bearish FVG",
@@ -825,11 +876,13 @@ function calculateFVG(candles) {
   };
 }
 
-// =====================================================
-// ORDER BLOCKS
-// =====================================================
 
-function calculateOrderBlocks(candles) {
+// ============================================================
+// ORDER BLOCK
+// ============================================================
+
+function detectOrderBlocks(candles) {
+
   const bullish = [];
   const bearish = [];
 
@@ -838,17 +891,20 @@ function calculateOrderBlocks(candles) {
     i < candles.length;
     i++
   ) {
+
     const previous =
       candles[i - 1];
 
     const current =
       candles[i];
 
+
     if (
       previous.close < previous.open &&
       current.close > current.open &&
       current.close > previous.high
     ) {
+
       bullish.push({
         time: previous.time,
         type: "Bullish Order Block",
@@ -857,11 +913,13 @@ function calculateOrderBlocks(candles) {
       });
     }
 
+
     if (
       previous.close > previous.open &&
       current.close < current.open &&
       current.close < previous.low
     ) {
+
       bearish.push({
         time: previous.time,
         type: "Bearish Order Block",
@@ -877,354 +935,240 @@ function calculateOrderBlocks(candles) {
   };
 }
 
-// =====================================================
-// SUPPLY / DEMAND
-// =====================================================
 
-function calculateSupplyDemand(candles) {
+// ============================================================
+// SUPPLY / DEMAND
+// ============================================================
+
+function detectSupplyDemand(
+  candles,
+  swingHighs,
+  swingLows
+) {
+
   const supply = [];
   const demand = [];
 
+
   for (
-    let i = 1;
-    i < candles.length;
-    i++
+    const swing of swingHighs.slice(-10)
   ) {
-    const previous =
-      candles[i - 1];
 
-    const current =
-      candles[i];
+    const candle =
+      candles[swing.index];
 
-    if (
-      previous.close > previous.open &&
-      current.close < current.open &&
-      current.close < previous.low
-    ) {
-      supply.push({
-        time: previous.time,
-        low: previous.low,
-        high: previous.high,
-        type: "Supply Zone"
-      });
-    }
+    if (!candle) continue;
 
-    if (
-      previous.close < previous.open &&
-      current.close > current.open &&
-      current.close > previous.high
-    ) {
-      demand.push({
-        time: previous.time,
-        low: previous.low,
-        high: previous.high,
-        type: "Demand Zone"
-      });
-    }
+    supply.push({
+      time: candle.time,
+      high: candle.high,
+      low: candle.low
+    });
   }
 
+
+  for (
+    const swing of swingLows.slice(-10)
+  ) {
+
+    const candle =
+      candles[swing.index];
+
+    if (!candle) continue;
+
+    demand.push({
+      time: candle.time,
+      high: candle.high,
+      low: candle.low
+    });
+  }
+
+
   return {
-    supply: supply.slice(-10),
-    demand: demand.slice(-10)
+    supply,
+    demand
   };
 }
 
-// =====================================================
-// CLASSIC PATTERNS
-// =====================================================
 
-function detectClassicPatterns(candles) {
-  const patterns = [];
+// ============================================================
+// SUPPORT / RESISTANCE
+// ============================================================
 
-  if (candles.length < 20) {
+function calculateLevels(
+  currentPrice,
+  swingHighs,
+  swingLows
+) {
+
+  const supports =
+    swingLows
+      .map(x => x.price)
+      .filter(
+        price => price < currentPrice
+      )
+      .sort((a, b) => b - a);
+
+
+  const resistances =
+    swingHighs
+      .map(x => x.price)
+      .filter(
+        price => price > currentPrice
+      )
+      .sort((a, b) => a - b);
+
+
+  return {
+
+    nearestSupport:
+      supports[0] ?? null,
+
+    nextSupport:
+      supports[1] ?? null,
+
+    nearestResistance:
+      resistances[0] ?? null,
+
+    nextResistance:
+      resistances[1] ?? null,
+
+    allSupports:
+      supports.slice(0, 5),
+
+    allResistances:
+      resistances.slice(0, 5)
+  };
+}
+
+
+// ============================================================
+// VOLUME
+// ============================================================
+
+function analyzeVolume(candles) {
+
+  const available =
+    candles.some(
+      c =>
+        c.volume !== null &&
+        Number.isFinite(c.volume)
+    );
+
+  if (!available) {
+
     return {
-      detected: [],
-      note: "Insufficient data"
+      available: false,
+      status: "Volume unavailable from data source"
     };
   }
 
-  const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
 
-  // Double top / bottom approximation
-  const highs = [];
-  const lows = [];
+  const volumes =
+    candles
+      .map(c => c.volume)
+      .filter(
+        v =>
+          v !== null &&
+          Number.isFinite(v)
+      );
 
-  for (
-    let i = candles.length - 20;
-    i < candles.length - 2;
-    i++
-  ) {
-    highs.push(candles[i].high);
-    lows.push(candles[i].low);
+
+  if (volumes.length < 20) {
+
+    return {
+      available: true,
+      status: "Insufficient volume history"
+    };
   }
 
-  const recentHigh =
-    Math.max(...highs);
 
-  const recentLow =
-    Math.min(...lows);
+  const current =
+    volumes[volumes.length - 1];
 
-  const highTolerance =
-    recentHigh * 0.0015;
+  const previous20 =
+    volumes.slice(-21, -1);
 
-  const lowTolerance =
-    recentLow * 0.0015;
+  const average =
+    previous20.reduce(
+      (a, b) => a + b,
+      0
+    ) / previous20.length;
 
-  let similarHighCount = 0;
-  let similarLowCount = 0;
-
-  for (const h of highs) {
-    if (
-      Math.abs(h - recentHigh) <=
-      highTolerance
-    ) {
-      similarHighCount++;
-    }
-  }
-
-  for (const l of lows) {
-    if (
-      Math.abs(l - recentLow) <=
-      lowTolerance
-    ) {
-      similarLowCount++;
-    }
-  }
-
-  if (similarHighCount >= 2) {
-    patterns.push({
-      pattern:
-        "Possible Double Top Area",
-      reason:
-        "Multiple highs are clustered near a recent high."
-    });
-  }
-
-  if (similarLowCount >= 2) {
-    patterns.push({
-      pattern:
-        "Possible Double Bottom Area",
-      reason:
-        "Multiple lows are clustered near a recent low."
-    });
-  }
-
-  // Simple inside bar
-  if (
-    last.high <= prev.high &&
-    last.low >= prev.low
-  ) {
-    patterns.push({
-      pattern: "Inside Bar",
-      reason:
-        "Latest candle is contained inside previous candle."
-    });
-  }
 
   return {
-    detected: patterns
+    available: true,
+    current,
+    average,
+    ratio:
+      average > 0
+        ? current / average
+        : null
   };
 }
 
-// =====================================================
-// TREND
-// =====================================================
 
-function calculateTrend(
-  EMA9,
-  EMA21,
-  EMA50,
-  RSI14,
-  latest
-) {
-  let trend = "Neutral";
+// ============================================================
+// SINGLE TIMEFRAME ANALYSIS
+// ============================================================
 
-  if (
-    EMA9 &&
-    EMA21 &&
-    EMA50
-  ) {
-    if (
-      EMA9 > EMA21 &&
-      EMA21 > EMA50 &&
-      latest.close > EMA9
-    ) {
-      trend = "Strong Bullish";
-    }
-
-    else if (
-      EMA9 < EMA21 &&
-      EMA21 < EMA50 &&
-      latest.close < EMA9
-    ) {
-      trend = "Strong Bearish";
-    }
-
-    else if (EMA9 > EMA21) {
-      trend = "Bullish";
-    }
-
-    else if (EMA9 < EMA21) {
-      trend = "Bearish";
-    }
-  }
-
-  let momentum = "Neutral";
-
-  if (RSI14 !== null) {
-    if (RSI14 >= 70)
-      momentum = "Overbought";
-    else if (RSI14 <= 30)
-      momentum = "Oversold";
-    else if (RSI14 > 55)
-      momentum = "Bullish Momentum";
-    else if (RSI14 < 45)
-      momentum = "Bearish Momentum";
-  }
-
-  return {
-    trend,
-    momentum
-  };
-}
-
-// =====================================================
-// ADVANCED SMC SCORE
-// =====================================================
-
-function calculateSMCContext(data) {
-  let bullishScore = 0;
-  let bearishScore = 0;
-
-  if (
-    data.marketStructure.classification ===
-    "Bullish Structure"
-  ) {
-    bullishScore++;
-  }
-
-  if (
-    data.marketStructure.classification ===
-    "Bearish Structure"
-  ) {
-    bearishScore++;
-  }
-
-  if (
-    data.BOS.signal ===
-    "Bullish BOS"
-  ) {
-    bullishScore += 2;
-  }
-
-  if (
-    data.BOS.signal ===
-    "Bearish BOS"
-  ) {
-    bearishScore += 2;
-  }
-
-  if (
-    data.CHoCH.signal ===
-    "Bullish CHoCH"
-  ) {
-    bullishScore += 2;
-  }
-
-  if (
-    data.CHoCH.signal ===
-    "Bearish CHoCH"
-  ) {
-    bearishScore += 2;
-  }
-
-  if (
-    data.MSS.signal ===
-    "Bullish MSS"
-  ) {
-    bullishScore += 2;
-  }
-
-  if (
-    data.MSS.signal ===
-    "Bearish MSS"
-  ) {
-    bearishScore += 2;
-  }
-
-  if (
-    data.liquidity.sweep ===
-    "Sell-side liquidity sweep"
-  ) {
-    bullishScore++;
-  }
-
-  if (
-    data.liquidity.sweep ===
-    "Buy-side liquidity sweep"
-  ) {
-    bearishScore++;
-  }
-
-  if (
-    data.trend ===
-    "Strong Bullish"
-  ) {
-    bullishScore++;
-  }
-
-  if (
-    data.trend ===
-    "Strong Bearish"
-  ) {
-    bearishScore++;
-  }
-
-  if (
-    data.MACD.direction ===
-    "Bullish"
-  ) {
-    bullishScore++;
-  }
-
-  if (
-    data.MACD.direction ===
-    "Bearish"
-  ) {
-    bearishScore++;
-  }
-
-  return {
-    bullishScore,
-    bearishScore,
-
-    totalScore:
-      bullishScore +
-      bearishScore,
-
-    context:
-      bullishScore > bearishScore
-        ? "Bullish Context"
-        : bearishScore > bullishScore
-          ? "Bearish Context"
-          : "Mixed Context"
-  };
-}
-
-// =====================================================
-// FULL TECHNICAL ENGINE
-// =====================================================
-
-function buildTechnicalAnalysis(
+function analyzeTimeframe(
   candles,
   timeframe
 ) {
-  const latest =
+
+  if (candles.length < 60) {
+
+    throw new Error(
+      `${timeframe}: insufficient candles`
+    );
+  }
+
+
+  /*
+    Twelve Data normally returns latest candle first.
+    We reverse it in getGoldCandles().
+    
+    The final candle may still be forming.
+    Therefore:
+    
+    candles[candles.length - 1] = forming/latest
+    candles[candles.length - 2] = latest closed
+  */
+
+  const formingCandle =
     candles[candles.length - 1];
 
+  const closedIndex =
+    candles.length - 2;
+
+  const closedCandle =
+    candles[closedIndex];
+
+
+  const closedCandles =
+    candles.slice(0, candles.length - 1);
+
+
   const closes =
-    candles.map(c => c.close);
+    closedCandles.map(
+      c => c.close
+    );
+
+
+  const swingHighs =
+    findSwingHighs(closedCandles);
+
+  const swingLows =
+    findSwingLows(closedCandles);
+
+
+  const structure =
+    getStructure(
+      swingHighs,
+      swingLows
+    );
+
 
   const EMA9 =
     calculateEMA(closes, 9);
@@ -1235,226 +1179,381 @@ function buildTechnicalAnalysis(
   const EMA50 =
     calculateEMA(closes, 50);
 
+
   const RSI14 =
     calculateRSI(closes, 14);
+
 
   const MACD =
     calculateMACD(closes);
 
+
   const ATR14 =
-    calculateATR(candles, 14);
-
-  const {
-    swingHighs,
-    swingLows
-  } = findSwings(candles);
-
-  const marketStructure =
-    calculateMarketStructure(
-      swingHighs,
-      swingLows
+    calculateATR(
+      closedCandles,
+      14
     );
 
-  const BOS =
-    calculateBOS(
-      candles,
+
+  const structureBreak =
+    detectStructureBreak(
+      closedCandle,
       swingHighs,
-      swingLows
+      swingLows,
+      structure
     );
 
-  const {
-    CHoCH,
-    MSS
-  } =
-    calculateCHoCHMSS(
-      candles,
-      swingHighs,
-      swingLows
-    );
 
   const liquidity =
-    calculateLiquidity(
-      candles,
+    detectLiquidity(
+      closedCandle,
+      swingHighs,
+      swingLows,
+      ATR14
+    );
+
+
+  const candle =
+    detectCandlestick(
+      closedCandle
+    );
+
+
+  const displacement =
+    detectDisplacement(
+      closedCandles,
+      closedIndex,
+      ATR14
+    );
+
+
+  const fvg =
+    detectFVG(
+      closedCandles
+    );
+
+
+  const orderBlocks =
+    detectOrderBlocks(
+      closedCandles
+    );
+
+
+  const supplyDemand =
+    detectSupplyDemand(
+      closedCandles,
       swingHighs,
       swingLows
     );
 
-  const priceAction =
-    calculatePriceAction(
-      candles
+
+  const levels =
+    calculateLevels(
+      closedCandle.close,
+      swingHighs,
+      swingLows
     );
 
-  const fvg =
-    calculateFVG(candles);
 
-  const orderBlocks =
-    calculateOrderBlocks(candles);
-
-  const supplyDemand =
-    calculateSupplyDemand(candles);
-
-  const classicPatterns =
-    detectClassicPatterns(candles);
-
-  const {
-    trend,
-    momentum
-  } =
-    calculateTrend(
-      EMA9,
-      EMA21,
-      EMA50,
-      RSI14,
-      latest
+  const volume =
+    analyzeVolume(
+      closedCandles
     );
 
-  const support =
-    swingLows
-      .slice(-10)
-      .map(x => x.price);
 
-  const resistance =
-    swingHighs
-      .slice(-10)
-      .map(x => x.price);
+  // ----------------------------------------------------------
+  // TREND
+  // ----------------------------------------------------------
 
-  const supportsBelow =
-    support.filter(
-      x => x < latest.close
-    );
+  let trend = "Neutral";
 
-  const resistancesAbove =
-    resistance.filter(
-      x => x > latest.close
-    );
-
-  const nearestSupport =
-    supportsBelow.length
-      ? Math.max(...supportsBelow)
-      : null;
-
-  const nearestResistance =
-    resistancesAbove.length
-      ? Math.min(...resistancesAbove)
-      : null;
-
-  const volumeAvailable =
-    candles.some(
-      c =>
-        c.volume !== null &&
-        !Number.isNaN(c.volume)
-    );
-
-  let volumeAnalysis =
-    "Insufficient data";
-
-  if (volumeAvailable) {
-    const volumes =
-      candles
-        .map(c => c.volume)
-        .filter(v => v !== null);
-
-    const latestVolume =
-      volumes[volumes.length - 1];
-
-    const average =
-      volumes
-        .slice(-20)
-        .reduce(
-          (a, b) => a + b,
-          0
-        ) /
-      Math.min(
-        20,
-        volumes.length
-      );
+  if (
+    EMA9 !== null &&
+    EMA21 !== null &&
+    EMA50 !== null
+  ) {
 
     if (
-      latestVolume >
-      average * 1.5
+      EMA9 > EMA21 &&
+      EMA21 > EMA50 &&
+      closedCandle.close > EMA9
     ) {
-      volumeAnalysis =
-        "High volume";
+
+      trend = "Strong Bullish";
     }
 
     else if (
-      latestVolume <
-      average * 0.7
+      EMA9 < EMA21 &&
+      EMA21 < EMA50 &&
+      closedCandle.close < EMA9
     ) {
-      volumeAnalysis =
-        "Low volume";
+
+      trend = "Strong Bearish";
     }
 
-    else {
-      volumeAnalysis =
-        "Normal volume";
+    else if (
+      EMA9 > EMA21
+    ) {
+
+      trend = "Bullish";
+    }
+
+    else if (
+      EMA9 < EMA21
+    ) {
+
+      trend = "Bearish";
     }
   }
 
-  const displacement =
-    priceAction.candleDirection ===
-      "Bullish"
-      ? "Bullish Displacement"
-      : priceAction.candleDirection ===
-          "Bearish"
-        ? "Bearish Displacement"
-        : "Neutral";
 
-  const result = {
-    success: true,
+  // ----------------------------------------------------------
+  // MOMENTUM
+  // ----------------------------------------------------------
 
-    instrument: "XAUUSD",
+  let momentum = "Neutral";
+
+  if (RSI14 !== null) {
+
+    if (RSI14 >= 70) {
+      momentum = "Overbought";
+    }
+
+    else if (RSI14 <= 30) {
+      momentum = "Oversold";
+    }
+
+    else if (RSI14 > 55) {
+      momentum = "Bullish Momentum";
+    }
+
+    else if (RSI14 < 45) {
+      momentum = "Bearish Momentum";
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // MACD BIAS
+  // ----------------------------------------------------------
+
+  let macdBias = "Neutral";
+
+  if (
+    MACD.line !== null &&
+    MACD.signal !== null
+  ) {
+
+    if (
+      MACD.line > MACD.signal &&
+      MACD.histogram > 0
+    ) {
+
+      macdBias = "Bullish";
+    }
+
+    else if (
+      MACD.line < MACD.signal &&
+      MACD.histogram < 0
+    ) {
+
+      macdBias = "Bearish";
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // SMC SCORE
+  // ----------------------------------------------------------
+
+  let bullishScore = 0;
+  let bearishScore = 0;
+
+
+  if (
+    structure.structure ===
+    "Bullish Structure"
+  ) {
+    bullishScore++;
+  }
+
+  if (
+    structure.structure ===
+    "Bearish Structure"
+  ) {
+    bearishScore++;
+  }
+
+
+  if (
+    structureBreak.BOS ===
+    "Bullish BOS"
+  ) {
+    bullishScore++;
+  }
+
+  if (
+    structureBreak.BOS ===
+    "Bearish BOS"
+  ) {
+    bearishScore++;
+  }
+
+
+  if (
+    structureBreak.CHoCH ===
+    "Bullish CHoCH"
+  ) {
+    bullishScore++;
+  }
+
+  if (
+    structureBreak.CHoCH ===
+    "Bearish CHoCH"
+  ) {
+    bearishScore++;
+  }
+
+
+  if (
+    liquidity.latestSweep?.type ===
+    "Sell-side liquidity sweep"
+  ) {
+    bullishScore++;
+  }
+
+  if (
+    liquidity.latestSweep?.type ===
+    "Buy-side liquidity sweep"
+  ) {
+    bearishScore++;
+  }
+
+
+  if (
+    displacement.type ===
+    "Bullish Displacement"
+  ) {
+    bullishScore++;
+  }
+
+  if (
+    displacement.type ===
+    "Bearish Displacement"
+  ) {
+    bearishScore++;
+  }
+
+
+  if (
+    fvg.bullish.length > 0
+  ) {
+    bullishScore++;
+  }
+
+  if (
+    fvg.bearish.length > 0
+  ) {
+    bearishScore++;
+  }
+
+
+  return {
 
     timeframe,
 
-    candlesUsed:
-      candles.length,
+    currentClosedCandle: closedCandle,
 
-    current: latest,
+    formingCandle,
 
-    marketStructure,
+    current: closedCandle,
 
-    latestSwingHigh:
-      swingHighs[swingHighs.length - 1] ||
-      null,
+    marketStructure: {
 
-    latestSwingLow:
-      swingLows[swingLows.length - 1] ||
-      null,
+      structure:
+        structure.structure,
 
-    BOS,
+      HH:
+        structure.HH,
 
-    CHoCH,
+      HL:
+        structure.HL,
 
-    MSS,
+      LH:
+        structure.LH,
+
+      LL:
+        structure.LL,
+
+      latestSwingHigh:
+        swingHighs[swingHighs.length - 1] ||
+        null,
+
+      previousSwingHigh:
+        swingHighs[swingHighs.length - 2] ||
+        null,
+
+      latestSwingLow:
+        swingLows[swingLows.length - 1] ||
+        null,
+
+      previousSwingLow:
+        swingLows[swingLows.length - 2] ||
+        null
+    },
+
+
+    BOS:
+      structureBreak.BOS,
+
+    BOSReason:
+      structureBreak.BOSReason,
+
+
+    CHoCH:
+      structureBreak.CHoCH,
+
+    CHoCHReason:
+      structureBreak.CHoCHReason,
+
+
+    MSS:
+      structureBreak.MSS,
+
+    MSSReason:
+      structureBreak.MSSReason,
+
 
     liquidity,
 
-    displacement: {
-      status: displacement,
-      candleStrength:
-        priceAction.candleStrength,
-      candleDirection:
-        priceAction.candleDirection,
-      range:
-        priceAction.range,
-      body:
-        priceAction.body
+
+    candle: {
+
+      direction:
+        closedCandle.close >
+        closedCandle.open
+          ? "Bullish"
+          : closedCandle.close <
+            closedCandle.open
+            ? "Bearish"
+            : "Doji",
+
+      ...candle
     },
 
-    priceAction,
 
-    classicPatterns,
+    displacement,
 
-    trend,
-
-    momentum,
 
     EMA: {
+
       EMA9,
+
       EMA21,
+
       EMA50
     },
+
 
     RSI14,
 
@@ -1462,519 +1561,804 @@ function buildTechnicalAnalysis(
 
     ATR14,
 
-    volume: {
-      available:
-        volumeAvailable,
-      analysis:
-        volumeAnalysis
-    },
+    trend,
 
-    support,
+    momentum,
 
-    resistance,
+    macdBias,
 
-    keyLevels: {
-      currentPrice:
-        latest.close,
-      nearestSupport,
-      nearestResistance,
-      ATR14
-    },
+
+    supportResistance:
+      levels,
+
 
     supplyDemand,
 
-    fvg,
+
+    FVG:
+      fvg,
+
 
     orderBlocks,
 
+
+    volume,
+
+
+    SMC: {
+
+      bullishScore,
+
+      bearishScore
+    },
+
+
     swingHighs:
-      swingHighs.slice(-15),
+      swingHighs.slice(-10),
 
     swingLows:
-      swingLows.slice(-15)
+      swingLows.slice(-10)
   };
-
-  result.SMC =
-    calculateSMCContext(
-      result
-    );
-
-  return result;
 }
 
-// =====================================================
+
+// ============================================================
 // TECHNICAL ANALYSIS
-// =====================================================
+// ============================================================
 
-app.get("/technical-analysis", async (req, res) => {
-  try {
-    const candles =
-      await getGoldCandles(
-        "5min",
-        200
-      );
+app.get(
+  "/technical-analysis",
+  async (req, res) => {
 
-    res.json(
-      buildTechnicalAnalysis(
-        candles,
-        "5M"
-      )
-    );
+    try {
 
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+      const candles =
+        await getGoldCandles(
+          "5min",
+          200
+        );
+
+
+      const analysis =
+        analyzeTimeframe(
+          candles,
+          "5M"
+        );
+
+
+      res.json({
+
+        success: true,
+
+        instrument:
+          "XAUUSD",
+
+        timeframe:
+          "5min",
+
+        analysis
+
+      });
+
+    }
+
+    catch (error) {
+
+      res.status(500).json({
+
+        success: false,
+
+        error:
+          error.message
+      });
+    }
   }
-});
+);
 
-// =====================================================
+
+// ============================================================
 // MTF ANALYSIS
-// =====================================================
+// ============================================================
 
-app.get("/mtf-analysis", async (req, res) => {
-  try {
-    const [
-      candles1H,
-      candles15M,
-      candles5M
-    ] = await Promise.all([
-      getGoldCandles("1h", 200),
-      getGoldCandles("15min", 200),
-      getGoldCandles("5min", 200)
-    ]);
+app.get(
+  "/mtf-analysis",
+  async (req, res) => {
 
-    const H1 =
-      buildTechnicalAnalysis(
+    try {
+
+      const [
         candles1H,
-        "1H"
-      );
-
-    const M15 =
-      buildTechnicalAnalysis(
         candles15M,
-        "15M"
-      );
+        candles5M
+      ] = await Promise.all([
 
-    const M5 =
-      buildTechnicalAnalysis(
-        candles5M,
-        "5M"
-      );
+        getGoldCandles(
+          "1h",
+          200
+        ),
 
-    function direction(a) {
+        getGoldCandles(
+          "15min",
+          200
+        ),
+
+        getGoldCandles(
+          "5min",
+          200
+        )
+      ]);
+
+
+      const analysis1H =
+        analyzeTimeframe(
+          candles1H,
+          "1H"
+        );
+
+
+      const analysis15M =
+        analyzeTimeframe(
+          candles15M,
+          "15M"
+        );
+
+
+      const analysis5M =
+        analyzeTimeframe(
+          candles5M,
+          "5M"
+        );
+
+
+      const trend1H =
+        analysis1H.trend;
+
+      const trend15M =
+        analysis15M.trend;
+
+      const trend5M =
+        analysis5M.trend;
+
+
+      let alignment =
+        "Mixed MTF";
+
       if (
-        a.trend === "Bullish" ||
-        a.trend === "Strong Bullish"
+        trend1H.includes("Bullish") &&
+        trend15M.includes("Bullish") &&
+        trend5M.includes("Bullish")
       ) {
-        return "Bullish";
+
+        alignment =
+          "Bullish MTF Alignment";
       }
+
+      else if (
+        trend1H.includes("Bearish") &&
+        trend15M.includes("Bearish") &&
+        trend5M.includes("Bearish")
+      ) {
+
+        alignment =
+          "Bearish MTF Alignment";
+      }
+
+
+      // --------------------------------------------------------
+      // MTF STRUCTURE SUMMARY
+      // --------------------------------------------------------
+
+      const bullishStructureCount =
+        [
+          analysis1H,
+          analysis15M,
+          analysis5M
+        ]
+          .filter(
+            a =>
+              a.marketStructure.structure ===
+              "Bullish Structure"
+          )
+          .length;
+
+
+      const bearishStructureCount =
+        [
+          analysis1H,
+          analysis15M,
+          analysis5M
+        ]
+          .filter(
+            a =>
+              a.marketStructure.structure ===
+              "Bearish Structure"
+          )
+          .length;
+
+
+      let structureBias =
+        "Neutral";
 
       if (
-        a.trend === "Bearish" ||
-        a.trend === "Strong Bearish"
+        bearishStructureCount >= 2
       ) {
-        return "Bearish";
+
+        structureBias =
+          "Bearish";
       }
 
-      return "Neutral";
-    }
+      else if (
+        bullishStructureCount >= 2
+      ) {
 
-    const d1H = direction(H1);
-    const d15M = direction(M15);
-    const d5M = direction(M5);
-
-    let alignment = "Mixed";
-
-    if (
-      d1H === "Bullish" &&
-      d15M === "Bullish" &&
-      d5M === "Bullish"
-    ) {
-      alignment =
-        "Bullish MTF Alignment";
-    }
-
-    if (
-      d1H === "Bearish" &&
-      d15M === "Bearish" &&
-      d5M === "Bearish"
-    ) {
-      alignment =
-        "Bearish MTF Alignment";
-    }
-
-    res.json({
-      success: true,
-
-      instrument: "XAUUSD",
-
-      MTF: {
-        "1H": d1H,
-        "15M": d15M,
-        "5M": d5M,
-        alignment
-      },
-
-      analysis: {
-        "1H": H1,
-        "15M": M15,
-        "5M": M5
+        structureBias =
+          "Bullish";
       }
-    });
 
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+
+      // --------------------------------------------------------
+      // HTF BOS
+      // --------------------------------------------------------
+
+      const HTFBOS =
+        analysis1H.BOS !== "None"
+          ? analysis1H.BOS
+          : analysis15M.BOS !== "None"
+            ? analysis15M.BOS
+            : "None";
+
+
+      // --------------------------------------------------------
+      // LTF CONFIRMATION
+      // --------------------------------------------------------
+
+      const LTFBOS =
+        analysis5M.BOS;
+
+
+      let entryConfirmation =
+        "Waiting";
+
+
+      if (
+        alignment ===
+          "Bullish MTF Alignment" &&
+        LTFBOS ===
+          "Bullish BOS"
+      ) {
+
+        entryConfirmation =
+          "Bullish structure confirmation";
+      }
+
+
+      else if (
+        alignment ===
+          "Bearish MTF Alignment" &&
+        LTFBOS ===
+          "Bearish BOS"
+      ) {
+
+        entryConfirmation =
+          "Bearish structure confirmation";
+      }
+
+
+      // --------------------------------------------------------
+      // MTF SUMMARY
+      // --------------------------------------------------------
+
+      const latest5M =
+        analysis5M.currentClosedCandle;
+
+
+      const support =
+        analysis5M
+          .supportResistance
+          .nearestSupport;
+
+
+      const resistance =
+        analysis5M
+          .supportResistance
+          .nearestResistance;
+
+
+      res.json({
+
+        success: true,
+
+        instrument:
+          "XAUUSD",
+
+
+        MTF: {
+
+          "1H":
+            trend1H,
+
+          "15M":
+            trend15M,
+
+          "5M":
+            trend5M,
+
+          alignment
+        },
+
+
+        MTF_STRUCTURE: {
+
+          "1H":
+            analysis1H
+              .marketStructure
+              .structure,
+
+          "15M":
+            analysis15M
+              .marketStructure
+              .structure,
+
+          "5M":
+            analysis5M
+              .marketStructure
+              .structure,
+
+          structureBias
+        },
+
+
+        MTF_CONFIRMATION: {
+
+          HTF_BOS:
+            HTFBOS,
+
+          LTF_BOS:
+            LTFBOS,
+
+          entryConfirmation
+        },
+
+
+        importantLevels: {
+
+          currentPrice:
+            latest5M.close,
+
+          support,
+
+          nextSupport:
+            analysis5M
+              .supportResistance
+              .nextSupport,
+
+          resistance,
+
+          nextResistance:
+            analysis5M
+              .supportResistance
+              .nextResistance
+        },
+
+
+        analysis: {
+
+          "1H":
+            analysis1H,
+
+          "15M":
+            analysis15M,
+
+          "5M":
+            analysis5M
+        }
+
+      });
+
+    }
+
+    catch (error) {
+
+      res.status(500).json({
+
+        success: false,
+
+        error:
+          error.message
+      });
+    }
   }
-});
+);
 
-// =====================================================
-// GOLD DATA
-// =====================================================
 
-app.get("/gold-data", async (req, res) => {
-  try {
-    const candles =
-      await getGoldCandles(
-        "5min",
-        200
-      );
+// ============================================================
+// GOLD RAW DATA
+// ============================================================
 
-    res.json({
-      success: true,
-      instrument: "XAUUSD",
-      interval: "5min",
-      candles
-    });
+app.get(
+  "/gold-data",
+  async (req, res) => {
 
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    try {
+
+      const candles =
+        await getGoldCandles(
+          "5min",
+          50
+        );
+
+
+      res.json({
+
+        success: true,
+
+        instrument:
+          "XAUUSD",
+
+        interval:
+          "5min",
+
+        candles
+      });
+
+    }
+
+    catch (error) {
+
+      res.status(500).json({
+
+        success: false,
+
+        error:
+          error.message
+      });
+    }
   }
-});
+);
 
-// =====================================================
-// STEP 10 - AI COMPREHENSIVE ANALYSIS
-// =====================================================
 
-app.get("/analyze", async (req, res) => {
-  try {
-    const [
-      candles1H,
-      candles15M,
-      candles5M
-    ] = await Promise.all([
-      getGoldCandles("1h", 200),
-      getGoldCandles("15min", 200),
-      getGoldCandles("5min", 200)
-    ]);
+// ============================================================
+// GEMINI TEST
+// ============================================================
 
-    const H1 =
-      buildTechnicalAnalysis(
-        candles1H,
-        "1H"
-      );
+app.get(
+  "/gemini-test",
+  async (req, res) => {
 
-    const M15 =
-      buildTechnicalAnalysis(
-        candles15M,
-        "15M"
-      );
+    try {
 
-    const M5 =
-      buildTechnicalAnalysis(
-        candles5M,
-        "5M"
-      );
+      if (!GEMINI_API_KEY) {
 
-    const prompt = `
-You are an advanced XAUUSD Gold market-analysis AI.
+        return res.status(500).json({
 
-Analyze ONLY the technical data supplied below.
+          success: false,
+
+          error:
+            "GEMINI_API_KEY is not configured"
+        });
+      }
+
+
+      const response =
+        await fetch(
+          "https://generativelanguage.googleapis.com/v1beta/interactions",
+          {
+            method: "POST",
+
+            headers: {
+
+              "Content-Type":
+                "application/json",
+
+              "x-goog-api-key":
+                GEMINI_API_KEY
+            },
+
+            body:
+              JSON.stringify({
+
+                model:
+                  "gemini-3.8-flash",
+
+                input:
+                  "Reply with exactly: GEMINI CONNECTION OK"
+              })
+          }
+        );
+
+
+      const data =
+        await response.json();
+
+
+      if (!response.ok) {
+
+        return res.status(502).json(
+          data
+        );
+      }
+
+
+      const answer =
+        data.steps
+          ?.find(
+            s =>
+              s.type ===
+              "model_output"
+          )
+          ?.content
+          ?.find(
+            c =>
+              c.type ===
+              "text"
+          )
+          ?.text ||
+        "No output returned";
+
+
+      res.json({
+
+        success: true,
+
+        answer
+      });
+
+    }
+
+    catch (error) {
+
+      res.status(500).json({
+
+        success: false,
+
+        error:
+          error.message
+      });
+    }
+  }
+);
+
+
+// ============================================================
+// GEMINI AI ANALYSIS
+// ============================================================
+
+app.get(
+  "/analyze",
+  async (req, res) => {
+
+    try {
+
+      if (!GEMINI_API_KEY) {
+
+        return res.status(500).json({
+
+          success: false,
+
+          error:
+            "GEMINI_API_KEY is not configured"
+        });
+      }
+
+
+      const candles =
+        await getGoldCandles(
+          "5min",
+          100
+        );
+
+
+      const candleText =
+        candles
+          .map(
+            c =>
+              `${c.time} | ` +
+              `O:${c.open} ` +
+              `H:${c.high} ` +
+              `L:${c.low} ` +
+              `C:${c.close}`
+          )
+          .join("\n");
+
+
+      const prompt = `
+
+You are an advanced XAUUSD Gold market analysis AI.
+
+Analyze ONLY the supplied OHLC data.
 
 Do not invent:
 - prices
-- volume
 - indicators
-- patterns
+- volume
 - liquidity
+- patterns
 - structure
+- news
 
-Use:
-1H = higher timeframe context
-15M = intermediate structure
-5M = execution context
+Instrument: XAUUSD
+Timeframe: 5 minutes
 
 Analyze:
 
-1. MTF trend
-2. Market structure
-3. HH / HL / LH / LL
+1. Market Bias
+2. HH / HL / LH / LL
+3. Market Structure
 4. BOS
 5. CHoCH
 6. MSS
 7. Liquidity
-8. Equal highs
-9. Equal lows
-10. Liquidity sweeps
-11. Support
-12. Resistance
-13. Supply
-14. Demand
-15. Order Blocks
-16. Fair Value Gaps
-17. Displacement
-18. Price action
-19. Candlestick patterns
-20. Classic chart pattern indications
-21. EMA
-22. RSI
-23. MACD
-24. ATR
-25. Volume if available
-26. SMC context
-27. Key levels
-28. Bullish scenario
-29. Bearish scenario
-30. Possible entry zones
-31. Stop-loss zone
-32. Take-profit zones
-33. Invalidation
+8. Equal Highs / Equal Lows
+9. Liquidity Sweeps
+10. Support
+11. Resistance
+12. Supply
+13. Demand
+14. Order Blocks
+15. Fair Value Gaps
+16. Displacement
+17. Price Action
+18. Candlestick Patterns
+19. EMA trend
+20. RSI momentum
+21. MACD
+22. ATR
+23. Volume only if available
+24. Key Levels
+25. Bullish Scenario
+26. Bearish Scenario
+27. Possible Entry Zone
+28. Stop Loss Zone
+29. Take Profit Zones
+30. Invalidation
+31. Risk Warning
 
-IMPORTANT:
+Important:
 
-- Clearly separate confirmed observations from possible interpretations.
-- If something cannot be confirmed, say "Insufficient data".
+- Clearly separate confirmed observations from interpretations.
+- If data is insufficient, say "Insufficient data".
 - Do not claim a trade is guaranteed.
-- Do not invent volume.
-- Use latest closed candle as reference.
-- Explain the reason behind important structure signals.
-- Higher timeframe context should be considered before lower timeframe signals.
-- A lower timeframe signal against the higher timeframe trend should be identified as a counter-trend situation.
-- Do not force an entry if conditions are unclear.
+- Do not treat a forming candle as a confirmed BOS.
+- Prefer closed candle confirmation.
+- Explain why each BOS/CHoCH/MSS/sweep is identified.
 
-Return exactly:
+Return:
 
-================================
-XAUUSD AI MARKET ANALYSIS
-================================
-
-CURRENT PRICE:
-
-MTF TREND:
-1H:
-15M:
-5M:
-
-MTF ALIGNMENT:
-
-================================
-MARKET STRUCTURE
-================================
-
-1H Structure:
-15M Structure:
-5M Structure:
-
-HH:
-HL:
-LH:
-LL:
-
+Market Bias:
+Market Structure:
 BOS:
 CHoCH:
 MSS:
-
-================================
-LIQUIDITY
-================================
-
-Buy-side Liquidity:
-Sell-side Liquidity:
-Equal Highs:
-Equal Lows:
-Latest Liquidity Sweep:
-
-================================
-SMC
-================================
-
-Order Blocks:
-Fair Value Gaps:
-Supply:
-Demand:
+Liquidity:
+Support:
+Resistance:
+Supply/Demand:
+Order Block:
+FVG:
 Displacement:
-
-SMC Context:
-
-================================
-PRICE ACTION
-================================
-
+Price Action:
 Candlestick:
-Classic Patterns:
-Trend:
-Momentum:
-
-================================
-INDICATORS
-================================
-
 EMA:
 RSI:
 MACD:
 ATR:
 Volume:
+Key Levels:
 
-================================
-KEY LEVELS
-================================
+Bullish Scenario:
+Bearish Scenario:
 
-Support:
-Resistance:
-Nearest Support:
-Nearest Resistance:
-
-================================
-BULLISH SCENARIO
-================================
-
-Explain what would confirm bullish continuation/reversal.
-
-================================
-BEARISH SCENARIO
-================================
-
-Explain what would confirm bearish continuation/reversal.
-
-================================
-POSSIBLE SETUP
-================================
-
-Entry Zone:
-Confirmation Required:
-Stop Loss Zone:
-Take Profit Zone 1:
-Take Profit Zone 2:
+Possible Entry Zone:
+Stop Loss:
+Take Profit:
 Invalidation:
 
-================================
-FINAL MARKET STATE
-================================
+Risk Warning:
 
-State whether the current technical picture is:
+GOLD OHLC DATA:
 
-Bullish
-Bearish
-Mixed
-or Neutral
-
-Explain why.
-
-================================
-RISK WARNING
-================================
-
-Mention uncertainty and that market conditions can change.
-
-================================
-1H DATA
-================================
-
-${JSON.stringify(H1, null, 2)}
-
-================================
-15M DATA
-================================
-
-${JSON.stringify(M15, null, 2)}
-
-================================
-5M DATA
-================================
-
-${JSON.stringify(M5, null, 2)}
+${candleText}
 `;
 
-    const response =
-      await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/interactions",
-        {
-          method: "POST",
 
-          headers: {
-            "Content-Type":
-              "application/json",
-            "x-goog-api-key":
-              GEMINI_API_KEY
-          },
+      const response =
+        await fetch(
+          "https://generativelanguage.googleapis.com/v1beta/interactions",
+          {
+            method: "POST",
 
-          body: JSON.stringify({
-            model:
-              "gemini-3.8-flash",
-            input: prompt
-          })
-        }
-      );
+            headers: {
 
-    const data =
-      await response.json();
+              "Content-Type":
+                "application/json",
 
-    if (!response.ok) {
-      return res
-        .status(502)
-        .json(data);
+              "x-goog-api-key":
+                GEMINI_API_KEY
+            },
+
+            body:
+              JSON.stringify({
+
+                model:
+                  "gemini-3.8-flash",
+
+                input:
+                  prompt
+              })
+          }
+        );
+
+
+      const data =
+        await response.json();
+
+
+      if (!response.ok) {
+
+        return res.status(502).json(
+          data
+        );
+      }
+
+
+      const answer =
+        data.steps
+          ?.find(
+            s =>
+              s.type ===
+              "model_output"
+          )
+          ?.content
+          ?.find(
+            c =>
+              c.type ===
+              "text"
+          )
+          ?.text ||
+        "No analysis returned";
+
+
+      res.json({
+
+        success: true,
+
+        instrument:
+          "XAUUSD",
+
+        timeframe:
+          "5min",
+
+        candles_used:
+          candles.length,
+
+        answer
+      });
+
     }
 
-    const answer =
-      data.steps
-        ?.find(
-          s =>
-            s.type ===
-            "model_output"
-        )
-        ?.content
-        ?.find(
-          c =>
-            c.type ===
-            "text"
-        )
-        ?.text ||
-      "No analysis returned";
+    catch (error) {
 
-    res.json({
-      success: true,
-      instrument: "XAUUSD",
-      timeframes: [
-        "1H",
-        "15M",
-        "5M"
-      ],
-      answer
-    });
+      res.status(500).json({
 
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+        success: false,
+
+        error:
+          error.message
+      });
+    }
   }
-});
+);
 
-// =====================================================
+
+// ============================================================
 // SERVER
-// =====================================================
+// ============================================================
 
 app.listen(
   PORT,
   "0.0.0.0",
   () => {
+
     console.log(
       "XAU AI BOT running on port " +
       PORT
