@@ -1,3 +1,4 @@
+```js
 import express from "express";
 
 const app = express();
@@ -14,6 +15,7 @@ app.get("/", (req, res) => {
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>XAU AI Bot</title>
+
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -51,7 +53,7 @@ app.get("/", (req, res) => {
       padding: 15px;
       border: 0;
       border-radius: 10px;
-      background: #ffffff;
+      background: white;
       color: #111;
       font-size: 18px;
       font-weight: bold;
@@ -66,7 +68,7 @@ app.get("/", (req, res) => {
 
 <body>
 
-<h1> XAU AI BOT </h1>
+<h1>XAU AI BOT</h1>
 
 <div class="box">
 
@@ -134,7 +136,6 @@ async function analyze() {
   try {
 
     const response = await fetch("/xau-ai", {
-
       method: "POST",
 
       headers: {
@@ -142,7 +143,6 @@ async function analyze() {
       },
 
       body: JSON.stringify(data)
-
     });
 
     const resultData = await response.json();
@@ -152,12 +152,19 @@ async function analyze() {
       "CONFIDENCE: " + resultData.confidence + "%\\n\\n" +
       "NEWS IMPACT: " + resultData.newsImpact + "\\n\\n" +
       "RISK: " + resultData.risk + "\\n\\n" +
-      "REASON:\\n" + resultData.reason;
+      "MARKET STRUCTURE: " + resultData.marketStructure + "\\n\\n" +
+      "LIQUIDITY: " + resultData.liquidity + "\\n\\n" +
+      "PATTERN: " + resultData.pattern + "\\n\\n" +
+      "CONDITIONS:\\n" +
+      (resultData.conditions || []).join("\\n") +
+      "\\n\\nCONFLICTS:\\n" +
+      (resultData.conflicts || []).join("\\n") +
+      "\\n\\nREASON:\\n" +
+      resultData.reason;
 
   } catch (error) {
 
-    result.innerText =
-      "ERROR:\\n" + error.message;
+    result.innerText = "ERROR:\\n" + error.message;
 
   }
 
@@ -181,8 +188,13 @@ app.post("/xau-ai", async (req, res) => {
         signal: "NO_TRADE",
         confidence: 0,
         newsImpact: "NEUTRAL",
-        reason: "GEMINI_API_KEY is missing in Render Environment Variables.",
-        risk: "HIGH"
+        risk: "HIGH",
+        reason: "GEMINI_API_KEY is missing in Render.",
+        conditions: [],
+        conflicts: [],
+        marketStructure: "NEUTRAL",
+        liquidity: "NEUTRAL",
+        pattern: "NONE"
       });
 
     }
@@ -190,18 +202,19 @@ app.post("/xau-ai", async (req, res) => {
     const marketData = req.body;
 
     const prompt = `
-You are the core analysis engine of a professional XAUUSD market-analysis system.
+You are the core XAUUSD market-analysis engine.
 
-IMPORTANT:
-This is NOT only a news-analysis bot.
+This is NOT only a news bot.
 
-The long-term system is designed to analyze as many established technical-analysis methods as practical.
+Analyze XAUUSD using structured confluence.
 
-Analyze the supplied XAUUSD market data using structured confluence.
+Use only information actually supplied or obtained through the available search tool.
 
-Consider, when data is available:
+Never invent indicator values, chart patterns, liquidity events, order flow, market structure or news.
 
-1. PRICE ACTION
+Consider these categories whenever sufficient data exists:
+
+PRICE ACTION
 - trend
 - HH
 - HL
@@ -213,7 +226,7 @@ Consider, when data is available:
 - consolidation
 - expansion
 
-2. CANDLESTICK ANALYSIS
+CANDLESTICKS
 - engulfing
 - pin bar
 - hammer
@@ -221,10 +234,10 @@ Consider, when data is available:
 - doji
 - inside bar
 - outside bar
-- morning/evening star
-- other recognized formations
+- morning star
+- evening star
 
-3. CHART PATTERNS
+CHART PATTERNS
 - head and shoulders
 - inverse head and shoulders
 - double top
@@ -239,19 +252,17 @@ Consider, when data is available:
 - channels
 - cup and handle
 - rounding structures
-- other recognizable formations
 
-4. MARKET STRUCTURE
+MARKET STRUCTURE
 - BOS
 - CHoCH
 - MSS
+- swing highs/lows
 - internal structure
 - external structure
-- swing highs/lows
 - trend/range
 
-5. SMC / ICT
-- liquidity pools
+SMC / ICT
 - buy-side liquidity
 - sell-side liquidity
 - liquidity sweep
@@ -264,7 +275,7 @@ Consider, when data is available:
 - displacement
 - premium/discount
 
-6. LEVELS
+LEVELS
 - support
 - resistance
 - supply
@@ -274,10 +285,10 @@ Consider, when data is available:
 - previous high/low
 - session high/low
 
-7. INDICATORS
-Use supplied indicators when available and do not invent values.
+INDICATORS
+Use supplied indicator values only.
 
-Consider categories such as:
+Consider:
 - moving averages
 - RSI
 - MACD
@@ -294,19 +305,21 @@ Consider categories such as:
 - OBV
 - MFI
 - CMF
-- volume analysis
-- volatility measurements
-- momentum measurements
+- volume
+- volatility
+- momentum
 
-8. MULTI-TIMEFRAME
-When multiple timeframes are supplied, compare them and identify alignment or conflict.
+MULTI-TIMEFRAME
+If multiple timeframes are supplied, compare them and identify alignment or conflict.
 
-9. VOLUME / ORDER-FLOW STYLE INFORMATION
-Use only actual supplied data.
-Do not invent order-book or footprint data.
+VOLUME / ORDER FLOW
+Use only actual supplied information.
+Do not invent order-book, footprint or institutional-flow data.
 
-10. FUNDAMENTAL / NEWS
-Use Google Search grounding when available to check important current events affecting gold, including:
+FUNDAMENTAL / NEWS
+Use Google Search when current news is needed.
+
+Check relevant events such as:
 - CPI
 - Core CPI
 - PPI
@@ -321,107 +334,135 @@ Use Google Search grounding when available to check important current events aff
 - Treasury yields
 - major geopolitical/economic events
 
-Do NOT invent news.
+Do not invent news.
 
-11. CONFLUENCE
-Do not trade from one indicator alone.
+CONFLUENCE RULE
+Do not make a decision from one indicator alone.
 
-Look for agreement between multiple independent categories.
+Look for agreement between independent categories.
 
-If evidence conflicts strongly, prefer NO_TRADE.
+If important evidence conflicts, use NO_TRADE.
 
-If important high-impact news is imminent and risk is unusually high, prefer NO_TRADE.
+If major high-impact news is imminent and risk is unusually high, use NO_TRADE.
 
-This is analysis only and is not a guarantee of profit.
+Important limitation:
+The current input may contain only one candle and a few indicators.
+Do NOT claim that complex patterns, BOS, CHoCH, liquidity sweeps, order blocks or multi-timeframe confirmation exist unless enough data is supplied.
 
-Return ONLY valid JSON.
-
-Use exactly this structure:
-
-{
-  "signal": "BUY",
-  "confidence": 0,
-  "newsImpact": "BULLISH",
-  "risk": "LOW",
-  "reason": "short explanation",
-  "conditions": [],
-  "conflicts": [],
-  "marketStructure": "NEUTRAL",
-  "liquidity": "NEUTRAL",
-  "pattern": "NONE"
-}
-
-Allowed signal:
-BUY
-SELL
-NO_TRADE
-
-Allowed newsImpact:
-BULLISH
-BEARISH
-NEUTRAL
-
-Allowed risk:
-LOW
-MEDIUM
-HIGH
-
-Allowed marketStructure:
-BULLISH
-BEARISH
-NEUTRAL
-
-Allowed liquidity:
-BULLISH
-BEARISH
-NEUTRAL
-
-confidence must be an integer from 0 to 100.
-
-conditions must contain the important confirmed conditions.
-
-conflicts must contain important conflicting signals.
-
-Do not claim that an indicator, pattern, liquidity event or structure exists unless the supplied data is sufficient to support it.
+Return the analysis as structured JSON.
 
 MARKET DATA:
 ${JSON.stringify(marketData)}
 `;
 
+
     const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
-      encodeURIComponent(GEMINI_API_KEY),
+      "https://generativelanguage.googleapis.com/v1/interactions",
       {
         method: "POST",
 
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          "x-goog-api-key": GEMINI_API_KEY
         },
 
         body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: prompt
-                }
-              ]
-            }
-          ],
 
-          generationConfig: {
-            temperature: 0.2,
-            responseMimeType: "application/json"
-          },
+          model: "gemini-3.8-flash",
+
+          input: prompt,
 
           tools: [
             {
-              googleSearch: {}
+              type: "google_search"
             }
-          ]
+          ],
+
+          generation_config: {
+            temperature: 0.2
+          },
+
+          response_format: {
+            type: "text",
+            mime_type: "application/json",
+
+            schema: {
+              type: "object",
+
+              properties: {
+
+                signal: {
+                  type: "string",
+                  enum: ["BUY", "SELL", "NO_TRADE"]
+                },
+
+                confidence: {
+                  type: "integer"
+                },
+
+                newsImpact: {
+                  type: "string",
+                  enum: ["BULLISH", "BEARISH", "NEUTRAL"]
+                },
+
+                risk: {
+                  type: "string",
+                  enum: ["LOW", "MEDIUM", "HIGH"]
+                },
+
+                reason: {
+                  type: "string"
+                },
+
+                conditions: {
+                  type: "array",
+                  items: {
+                    type: "string"
+                  }
+                },
+
+                conflicts: {
+                  type: "array",
+                  items: {
+                    type: "string"
+                  }
+                },
+
+                marketStructure: {
+                  type: "string",
+                  enum: ["BULLISH", "BEARISH", "NEUTRAL"]
+                },
+
+                liquidity: {
+                  type: "string",
+                  enum: ["BULLISH", "BEARISH", "NEUTRAL"]
+                },
+
+                pattern: {
+                  type: "string"
+                }
+
+              },
+
+              required: [
+                "signal",
+                "confidence",
+                "newsImpact",
+                "risk",
+                "reason",
+                "conditions",
+                "conflicts",
+                "marketStructure",
+                "liquidity",
+                "pattern"
+              ]
+            }
+          }
+
         })
       }
     );
+
 
     const data = await response.json();
 
@@ -433,13 +474,25 @@ ${JSON.stringify(marketData)}
         signal: "NO_TRADE",
         confidence: 0,
         newsImpact: "NEUTRAL",
+        risk: "HIGH",
         reason: "Gemini API error. Check Render logs.",
-        risk: "HIGH"
+        conditions: [],
+        conflicts: [],
+        marketStructure: "NEUTRAL",
+        liquidity: "NEUTRAL",
+        pattern: "NONE"
       });
+
     }
 
+
     const text =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      data?.steps
+        ?.filter(step => step.type === "model_output")
+        ?.flatMap(step => step.content || [])
+        ?.find(content => content.type === "text")
+        ?.text || data?.output_text || "";
+
 
     let result;
 
@@ -449,14 +502,14 @@ ${JSON.stringify(marketData)}
 
     } catch (error) {
 
-      console.error("JSON ERROR:", text);
+      console.error("JSON PARSE ERROR:", text);
 
       return res.json({
         signal: "NO_TRADE",
         confidence: 0,
         newsImpact: "NEUTRAL",
-        reason: "Gemini returned invalid JSON.",
         risk: "HIGH",
+        reason: "Gemini returned invalid JSON.",
         conditions: [],
         conflicts: [],
         marketStructure: "NEUTRAL",
@@ -465,6 +518,7 @@ ${JSON.stringify(marketData)}
       });
 
     }
+
 
     if (!["BUY", "SELL", "NO_TRADE"].includes(result.signal)) {
       result.signal = "NO_TRADE";
@@ -509,6 +563,7 @@ ${JSON.stringify(marketData)}
 
     res.json(result);
 
+
   } catch (error) {
 
     console.error("SERVER ERROR:", error);
@@ -517,8 +572,8 @@ ${JSON.stringify(marketData)}
       signal: "NO_TRADE",
       confidence: 0,
       newsImpact: "NEUTRAL",
-      reason: "Backend error. Check Render logs.",
       risk: "HIGH",
+      reason: "Backend error. Check Render logs.",
       conditions: [],
       conflicts: [],
       marketStructure: "NEUTRAL",
@@ -538,3 +593,4 @@ app.listen(PORT, () => {
   );
 
 });
+```
