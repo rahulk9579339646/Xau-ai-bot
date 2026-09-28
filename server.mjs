@@ -498,6 +498,86 @@ const candleDirection =
     : latest.close < latest.open
       ? "Bearish"
       : "Doji";
+// -----------------------------
+// Candlestick Pattern Detection
+// -----------------------------
+
+const body = Math.abs(latest.close - latest.open);
+const upperWick = latest.high - Math.max(latest.open, latest.close);
+const lowerWick = Math.min(latest.open, latest.close) - latest.low;
+
+let candlestickPattern = "None";
+
+// Doji
+if (
+  candleRange > 0 &&
+  body / candleRange <= 0.10
+) {
+  candlestickPattern = "Doji";
+}
+
+// Hammer
+else if (
+  lowerWick >= body * 2 &&
+  upperWick <= body &&
+  latest.close >= latest.open
+) {
+  candlestickPattern = "Hammer";
+}
+
+// Shooting Star
+else if (
+  upperWick >= body * 2 &&
+  lowerWick <= body &&
+  latest.close <= latest.open
+) {
+  candlestickPattern = "Shooting Star";
+}
+
+// Bullish Engulfing
+else if (candles.length >= 2) {
+
+  const previous = candles[candles.length - 2];
+
+  if (
+    previous.close < previous.open &&
+    latest.close > latest.open &&
+    latest.open <= previous.close &&
+    latest.close >= previous.open
+  ) {
+    candlestickPattern = "Bullish Engulfing";
+  }
+}
+
+// Bearish Engulfing
+if (candles.length >= 2) {
+
+  const previous = candles[candles.length - 2];
+
+  if (
+    previous.close > previous.open &&
+    latest.close < latest.open &&
+    latest.open >= previous.close &&
+    latest.close <= previous.open
+  ) {
+    candlestickPattern = "Bearish Engulfing";
+  }
+}
+
+// Pin Bar
+if (
+  candleRange > 0 &&
+  body / candleRange <= 0.30
+) {
+
+  if (lowerWick >= body * 2) {
+    candlestickPattern = "Bullish Pin Bar";
+  }
+
+  else if (upperWick >= body * 2) {
+    candlestickPattern = "Bearish Pin Bar";
+  }
+}
     
     // -----------------------------
     // Liquidity Sweep
@@ -637,10 +717,12 @@ EMA: {
 
   momentum,
       
-  candleStrength,
-
+  candleStrength,    
+   
   candleDirection,
 
+  candlestickPattern,
+      
   candleRange,
 
   candleBody,
