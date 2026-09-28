@@ -217,6 +217,162 @@ app.get("/gold-data", async (req, res) => {
     });
   }
 });
+app.get("/technical-analysis", async (req, res) => {
+  try {
+    const response = await fetch(
+      `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=5min&outputsize=50&apikey=${TWELVE_DATA_API_KEY}`
+    );
+
+    const data = await response.json();
+
+    if (!response.ok || data.status === "error") {
+      return res.status(502).json({
+        success: false,
+        source: "Twelve Data",
+        error: data
+      });
+    }
+
+    const candles = data.values
+      .map(c => ({
+        time: c.datetime,
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close)
+      }))
+      .reverse();
+
+    // -----------------------------
+    // Swing High / Swing Low
+    // -----------------------------
+
+    const swingHighs = [];
+    const swingLows = [];
+
+    for (let i = 2; i < candles.length - 2; i++) {
+
+      const c = candles[i];
+
+      if (
+        c.high > candles[i - 1].high &&
+        c.high > candles[i - 2].high &&
+        c.high > candles[i + 1].high &&
+        c.high > candles[i + 2].high
+      ) {
+        swingHighs.push({
+          time: c.time,
+          price: c.high
+        });
+      }
+
+      if (
+        c.low < candles[i - 1].low &&
+        c.low < candles[i - 2].low &&
+        c.low < candles[i + 1].low &&
+        c.low < candles[i + 2].low
+      ) {
+        swingLows.push({
+          time: c.time,
+          price: c.low
+        });
+      }
+    }
+
+    const latest = candles[candles.length - 1];
+
+    const previousSwingHigh =
+      swingHighs[swingHighs.length - 1];
+
+    const previousSwingLow =
+      swingLows[swingLows.length - 1];
+
+    // -----------------------------
+    // BOS Detection
+    // -----------------------------
+
+    let BOS = "None";
+
+    if (
+      previousSwingHigh &&
+      latest.close > previousSwingHigh.price
+    ) {
+      BOS = "Bullish BOS";
+    }
+
+    if (
+      previousSwingLow &&
+      latest.close < previousSwingLow.price
+    ) {
+      BOS = "Bearish BOS";
+    }
+
+    // -----------------------------
+    // Liquidity Sweep
+    // -----------------------------
+
+    let liquiditySweep = "None";
+
+    if (
+      previousSwingHigh &&
+      latest.high > previousSwingHigh.price &&
+      latest.close < previousSwingHigh.price
+    ) {
+      liquiditySweep = "Buy-side liquidity sweep";
+    }
+
+    if (
+      previousSwingLow &&
+      latest.low < previousSwingLow.price &&
+      latest.close > previousSwingLow.price
+    ) {
+      liquiditySweep = "Sell-side liquidity sweep";
+    }
+
+    // -----------------------------
+    // Support / Resistance
+    // -----------------------------
+
+    const support = swingLows
+      .slice(-3)
+      .map(x => x.price);
+
+    const resistance = swingHighs
+      .slice(-3)
+      .map(x => x.price);
+
+    res.json({
+      success: true,
+      instrument: "XAUUSD",
+      timeframe: "5min",
+
+      current: latest,
+
+      marketStructure: {
+        latestSwingHigh: previousSwingHigh || null,
+        latestSwingLow: previousSwingLow || null
+      },
+
+      BOS,
+
+      liquiditySweep,
+
+      support,
+
+      resistance,
+
+      swingHighs: swingHighs.slice(-10),
+
+      swingLows: swingLows.slice(-10)
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log("Server running on port " + PORT);
