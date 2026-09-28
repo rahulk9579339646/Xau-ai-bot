@@ -6,6 +6,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 app.get("/", (req, res) => {
   res.send("XAU AI BOT IS ONLINE");
 });
