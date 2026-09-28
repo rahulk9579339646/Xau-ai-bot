@@ -1,179 +1,134 @@
 import express from "express";
-import OpenAI from "openai";
 
 const app = express();
 
-app.use(express.json({ limit: "100kb" }));
-
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+app.use(express.json({ limit: "200kb" }));
 
 const PORT = process.env.PORT || 3000;
-
-/* =========================
-   FRONTEND
-========================= */
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 app.get("/", (req, res) => {
   res.send(`
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XAU AI Bot</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #111;
+      color: white;
+      padding: 20px;
+      max-width: 700px;
+      margin: auto;
+    }
 
-<title>XAU AI Bot</title>
+    h1 {
+      text-align: center;
+    }
 
-<style>
-body {
-  font-family: Arial, sans-serif;
-  background: #111;
-  color: white;
-  margin: 0;
-  padding: 20px;
-}
+    .box {
+      background: #1d1d1d;
+      padding: 15px;
+      border-radius: 12px;
+      margin-bottom: 15px;
+    }
 
-.container {
-  max-width: 700px;
-  margin: auto;
-}
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 12px;
+      margin: 6px 0 12px;
+      border-radius: 8px;
+      border: 1px solid #555;
+      background: #222;
+      color: white;
+    }
 
-h1 {
-  text-align: center;
-}
+    button {
+      width: 100%;
+      padding: 15px;
+      border: 0;
+      border-radius: 10px;
+      background: #ffffff;
+      color: #111;
+      font-size: 18px;
+      font-weight: bold;
+    }
 
-.card {
-  background: #1d1d1d;
-  padding: 20px;
-  border-radius: 12px;
-  margin-top: 20px;
-}
-
-label {
-  display: block;
-  margin-top: 12px;
-  margin-bottom: 5px;
-}
-
-input {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 12px;
-  border-radius: 7px;
-  border: 1px solid #555;
-  background: #222;
-  color: white;
-}
-
-button {
-  width: 100%;
-  padding: 14px;
-  margin-top: 20px;
-  border: none;
-  border-radius: 8px;
-  font-size: 17px;
-  font-weight: bold;
-  cursor: pointer;
-}
-
-.result {
-  margin-top: 20px;
-  padding: 20px;
-  background: #222;
-  border-radius: 10px;
-  white-space: pre-wrap;
-}
-
-.status {
-  text-align: center;
-  margin-top: 10px;
-  color: #aaa;
-}
-</style>
+    #result {
+      white-space: pre-wrap;
+      line-height: 1.6;
+    }
+  </style>
 </head>
 
 <body>
 
-<div class="container">
+<h1> XAU AI BOT </h1>
 
-<h1>🟡 XAU AI BOT</h1>
+<div class="box">
 
-<div class="status">
-Gold / XAUUSD AI Market Analysis
-</div>
+  <label>Current Price</label>
+  <input id="price" type="number" step="any">
 
-<div class="card">
+  <label>Open</label>
+  <input id="open" type="number" step="any">
 
-<label>Current Price</label>
-<input id="price" placeholder="Example: 3800">
+  <label>High</label>
+  <input id="high" type="number" step="any">
 
-<label>Open</label>
-<input id="open" placeholder="M1 Open">
+  <label>Low</label>
+  <input id="low" type="number" step="any">
 
-<label>High</label>
-<input id="high" placeholder="M1 High">
+  <label>Close</label>
+  <input id="close" type="number" step="any">
 
-<label>Low</label>
-<input id="low" placeholder="M1 Low">
+  <label>RSI</label>
+  <input id="rsi" type="number" step="any">
 
-<label>Close</label>
-<input id="close" placeholder="M1 Close">
+  <label>EMA 5</label>
+  <input id="ema5" type="number" step="any">
 
-<label>RSI</label>
-<input id="rsi" placeholder="Example: 55">
+  <label>EMA 13</label>
+  <input id="ema13" type="number" step="any">
 
-<label>EMA 5</label>
-<input id="ema5" placeholder="EMA 5">
+  <label>Volume</label>
+  <input id="volume" type="number" step="any">
 
-<label>EMA 13</label>
-<input id="ema13" placeholder="EMA 13">
-
-<label>Volume</label>
-<input id="volume" placeholder="Volume">
-
-<button onclick="analyze()">ANALYZE XAUUSD</button>
-
-<div id="result" class="result">
-Waiting for analysis...
-</div>
+  <button onclick="analyze()">ANALYZE XAUUSD</button>
 
 </div>
 
+<div class="box">
+  <div id="result">Waiting for analysis...</div>
 </div>
 
 <script>
 
 async function analyze() {
 
-  const resultBox = document.getElementById("result");
+  const result = document.getElementById("result");
 
-  resultBox.innerText = "⏳ AI is analyzing XAUUSD...";
+  result.innerText = "Analyzing XAUUSD...";
 
-  const marketData = {
-
+  const data = {
     instrument: "XAUUSD",
-
     timeframe: "M1",
 
-    price: document.getElementById("price").value,
+    currentPrice: Number(document.getElementById("price").value),
+    open: Number(document.getElementById("open").value),
+    high: Number(document.getElementById("high").value),
+    low: Number(document.getElementById("low").value),
+    close: Number(document.getElementById("close").value),
 
-    open: document.getElementById("open").value,
-
-    high: document.getElementById("high").value,
-
-    low: document.getElementById("low").value,
-
-    close: document.getElementById("close").value,
-
-    rsi: document.getElementById("rsi").value,
-
-    ema5: document.getElementById("ema5").value,
-
-    ema13: document.getElementById("ema13").value,
-
-    volume: document.getElementById("volume").value
-
+    indicators: {
+      RSI: Number(document.getElementById("rsi").value),
+      EMA5: Number(document.getElementById("ema5").value),
+      EMA13: Number(document.getElementById("ema13").value),
+      volume: Number(document.getElementById("volume").value)
+    }
   };
 
   try {
@@ -186,30 +141,23 @@ async function analyze() {
         "Content-Type": "application/json"
       },
 
-      body: JSON.stringify(marketData)
+      body: JSON.stringify(data)
 
     });
 
-    const data = await response.json();
+    const resultData = await response.json();
 
-    resultBox.innerText =
+    result.innerText =
+      "SIGNAL: " + resultData.signal + "\\n\\n" +
+      "CONFIDENCE: " + resultData.confidence + "%\\n\\n" +
+      "NEWS IMPACT: " + resultData.newsImpact + "\\n\\n" +
+      "RISK: " + resultData.risk + "\\n\\n" +
+      "REASON:\\n" + resultData.reason;
 
-      "SIGNAL: " + data.signal + "\\n\\n" +
+  } catch (error) {
 
-      "CONFIDENCE: " + data.confidence + "%\\n\\n" +
-
-      "NEWS IMPACT: " + data.newsImpact + "\\n\\n" +
-
-      "RISK: " + data.risk + "\\n\\n" +
-
-      "REASON:\\n" + data.reason;
-
-  }
-
-  catch (error) {
-
-    resultBox.innerText =
-      "ERROR: " + error.message;
+    result.innerText =
+      "ERROR:\\n" + error.message;
 
   }
 
@@ -223,148 +171,297 @@ async function analyze() {
 });
 
 
-/* =========================
-   AI ANALYSIS API
-========================= */
-
 app.post("/xau-ai", async (req, res) => {
 
   try {
 
+    if (!GEMINI_API_KEY) {
+
+      return res.status(500).json({
+        signal: "NO_TRADE",
+        confidence: 0,
+        newsImpact: "NEUTRAL",
+        reason: "GEMINI_API_KEY is missing in Render Environment Variables.",
+        risk: "HIGH"
+      });
+
+    }
+
     const marketData = req.body;
 
     const prompt = `
+You are the core analysis engine of a professional XAUUSD market-analysis system.
 
-You are an XAUUSD M1 market-analysis engine.
+IMPORTANT:
+This is NOT only a news-analysis bot.
 
-Analyze the supplied XAUUSD M1 market data.
+The long-term system is designed to analyze as many established technical-analysis methods as practical.
 
-You MUST use live web search to check current information that can materially affect gold, including where relevant:
+Analyze the supplied XAUUSD market data using structured confluence.
 
+Consider, when data is available:
+
+1. PRICE ACTION
+- trend
+- HH
+- HL
+- LH
+- LL
+- breakout
+- retest
+- rejection
+- consolidation
+- expansion
+
+2. CANDLESTICK ANALYSIS
+- engulfing
+- pin bar
+- hammer
+- shooting star
+- doji
+- inside bar
+- outside bar
+- morning/evening star
+- other recognized formations
+
+3. CHART PATTERNS
+- head and shoulders
+- inverse head and shoulders
+- double top
+- double bottom
+- triple top
+- triple bottom
+- triangles
+- wedges
+- flags
+- pennants
+- rectangles
+- channels
+- cup and handle
+- rounding structures
+- other recognizable formations
+
+4. MARKET STRUCTURE
+- BOS
+- CHoCH
+- MSS
+- internal structure
+- external structure
+- swing highs/lows
+- trend/range
+
+5. SMC / ICT
+- liquidity pools
+- buy-side liquidity
+- sell-side liquidity
+- liquidity sweep
+- stop run
+- order block
+- breaker
+- mitigation
+- fair value gap
+- imbalance
+- displacement
+- premium/discount
+
+6. LEVELS
+- support
+- resistance
+- supply
+- demand
+- trendlines
+- channels
+- previous high/low
+- session high/low
+
+7. INDICATORS
+Use supplied indicators when available and do not invent values.
+
+Consider categories such as:
+- moving averages
+- RSI
+- MACD
+- stochastic
+- ADX
+- ATR
+- CCI
+- ROC
+- Williams %R
+- Bollinger Bands
+- Keltner Channels
+- Donchian Channels
+- VWAP
+- OBV
+- MFI
+- CMF
+- volume analysis
+- volatility measurements
+- momentum measurements
+
+8. MULTI-TIMEFRAME
+When multiple timeframes are supplied, compare them and identify alignment or conflict.
+
+9. VOLUME / ORDER-FLOW STYLE INFORMATION
+Use only actual supplied data.
+Do not invent order-book or footprint data.
+
+10. FUNDAMENTAL / NEWS
+Use Google Search grounding when available to check important current events affecting gold, including:
 - CPI
 - Core CPI
 - PPI
 - Core PPI
 - NFP
-- Unemployment
+- unemployment
 - Average Hourly Earnings
 - FOMC
 - Federal Reserve
-- Powell statements
-- US Dollar / DXY
-- US Treasury yields
-- major geopolitical events
-- major economic events
-- other important current gold-related news
+- Powell
+- DXY
+- Treasury yields
+- major geopolitical/economic events
 
 Do NOT invent news.
 
-Decision rules:
+11. CONFLUENCE
+Do not trade from one indicator alone.
 
-1. If important high-impact news is imminent or market risk is unusually high, prefer NO_TRADE.
+Look for agreement between multiple independent categories.
 
-2. Consider both supplied price action and current news.
+If evidence conflicts strongly, prefer NO_TRADE.
 
-3. Do not make a decision from news alone.
+If important high-impact news is imminent and risk is unusually high, prefer NO_TRADE.
 
-4. If evidence is conflicting, return NO_TRADE.
+This is analysis only and is not a guarantee of profit.
 
-5. This is an analysis signal, not a guarantee of profit.
+Return ONLY valid JSON.
 
-Return ONLY valid JSON in exactly this format:
+Use exactly this structure:
 
 {
   "signal": "BUY",
   "confidence": 0,
   "newsImpact": "BULLISH",
+  "risk": "LOW",
   "reason": "short explanation",
-  "risk": "LOW"
+  "conditions": [],
+  "conflicts": [],
+  "marketStructure": "NEUTRAL",
+  "liquidity": "NEUTRAL",
+  "pattern": "NONE"
 }
 
 Allowed signal:
-
 BUY
 SELL
 NO_TRADE
 
 Allowed newsImpact:
-
 BULLISH
 BEARISH
 NEUTRAL
 
 Allowed risk:
-
 LOW
 MEDIUM
 HIGH
 
+Allowed marketStructure:
+BULLISH
+BEARISH
+NEUTRAL
+
+Allowed liquidity:
+BULLISH
+BEARISH
+NEUTRAL
+
 confidence must be an integer from 0 to 100.
 
+conditions must contain the important confirmed conditions.
+
+conflicts must contain important conflicting signals.
+
+Do not claim that an indicator, pattern, liquidity event or structure exists unless the supplied data is sufficient to support it.
+
 MARKET DATA:
-
 ${JSON.stringify(marketData)}
-
 `;
 
-    const response = await client.responses.create({
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
+      encodeURIComponent(GEMINI_API_KEY),
+      {
+        method: "POST",
 
-      model: "gpt-5.6-luna",
+        headers: {
+          "Content-Type": "application/json"
+        },
 
-      tools: [
-        {
-          type: "web_search"
-        }
-      ],
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: prompt
+                }
+              ]
+            }
+          ],
 
-      tool_choice: "required",
+          generationConfig: {
+            temperature: 0.2,
+            responseMimeType: "application/json"
+          },
 
-      input: prompt
+          tools: [
+            {
+              googleSearch: {}
+            }
+          ]
+        })
+      }
+    );
 
-    });
+    const data = await response.json();
 
-    const text = response.output_text || "";
+    if (!response.ok) {
 
-    const match = text.match(/\{[\s\S]*\}/);
+      console.error("GEMINI ERROR:", data);
 
-    if (!match) {
-
-      return res.json({
-
+      return res.status(500).json({
         signal: "NO_TRADE",
-
         confidence: 0,
-
         newsImpact: "NEUTRAL",
-
-        reason: "AI did not return valid JSON",
-
+        reason: "Gemini API error. Check Render logs.",
         risk: "HIGH"
-
       });
-
     }
+
+    const text =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
     let result;
 
     try {
 
-      result = JSON.parse(match[0]);
+      result = JSON.parse(text);
 
     } catch (error) {
 
+      console.error("JSON ERROR:", text);
+
       return res.json({
-
         signal: "NO_TRADE",
-
         confidence: 0,
-
         newsImpact: "NEUTRAL",
-
-        reason: "Invalid AI JSON",
-
-        risk: "HIGH"
-
+        reason: "Gemini returned invalid JSON.",
+        risk: "HIGH",
+        conditions: [],
+        conflicts: [],
+        marketStructure: "NEUTRAL",
+        liquidity: "NEUTRAL",
+        pattern: "NONE"
       });
 
     }
@@ -381,6 +478,14 @@ ${JSON.stringify(marketData)}
       result.risk = "HIGH";
     }
 
+    if (!["BULLISH", "BEARISH", "NEUTRAL"].includes(result.marketStructure)) {
+      result.marketStructure = "NEUTRAL";
+    }
+
+    if (!["BULLISH", "BEARISH", "NEUTRAL"].includes(result.liquidity)) {
+      result.liquidity = "NEUTRAL";
+    }
+
     result.confidence = Math.max(
       0,
       Math.min(100, Number(result.confidence) || 0)
@@ -390,36 +495,41 @@ ${JSON.stringify(marketData)}
       result.reason || "No reason provided"
     );
 
+    if (!Array.isArray(result.conditions)) {
+      result.conditions = [];
+    }
+
+    if (!Array.isArray(result.conflicts)) {
+      result.conflicts = [];
+    }
+
+    result.pattern = String(
+      result.pattern || "NONE"
+    );
+
     res.json(result);
 
-  }
+  } catch (error) {
 
-  catch (error) {
-
-    console.error("AI ERROR:", error);
+    console.error("SERVER ERROR:", error);
 
     res.status(500).json({
-
       signal: "NO_TRADE",
-
       confidence: 0,
-
       newsImpact: "NEUTRAL",
-
-      reason: "Backend error",
-
-      risk: "HIGH"
-
+      reason: "Backend error. Check Render logs.",
+      risk: "HIGH",
+      conditions: [],
+      conflicts: [],
+      marketStructure: "NEUTRAL",
+      liquidity: "NEUTRAL",
+      pattern: "NONE"
     });
 
   }
 
 });
 
-
-/* =========================
-   START SERVER
-========================= */
 
 app.listen(PORT, () => {
 
