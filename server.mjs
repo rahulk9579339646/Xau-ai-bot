@@ -460,7 +460,6 @@ app.post("/xau-ai", async function (req, res) {
 });
 
 
-app.listen(PORT, function () {
-  console.log("XAU AI server running on port " + PORT);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
 });
-```
