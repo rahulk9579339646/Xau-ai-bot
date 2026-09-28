@@ -801,7 +801,6 @@ multiTimeframe: {
   },
 
   "15m": {
-    trend: trend15m,
     EMA9: EMA9_15m,
     EMA21: EMA21_15m,
     EMA50: EMA50_15m,
@@ -809,7 +808,6 @@ multiTimeframe: {
   },
 
   "1h": {
-    trend: trend1h,
     EMA9: EMA9_1h,
     EMA21: EMA21_1h,
     EMA50: EMA50_1h,
