@@ -350,7 +350,24 @@ function calculateEMA(values, period) {
 }
 
 const closes = candles.map(c => c.close);
+// -----------------------------
+// Multi-Timeframe EMA
+// -----------------------------
 
+const closes15m = candles15m.map(c => c.close);
+const closes1h = candles1h.map(c => c.close);
+
+const EMA9_15m = calculateEMA(closes15m, 9);
+const EMA21_15m = calculateEMA(closes15m, 21);
+const EMA50_15m = calculateEMA(closes15m, 50);
+
+const EMA9_1h = calculateEMA(closes1h, 9);
+const EMA21_1h = calculateEMA(closes1h, 21);
+const EMA50_1h = calculateEMA(closes1h, 50);
+
+const latest15m = candles15m[candles15m.length - 1];
+const latest1h = candles1h[candles1h.length - 1];
+    
 const EMA9 = calculateEMA(closes, 9);
 const EMA21 = calculateEMA(closes, 21);
 const EMA50 = calculateEMA(closes, 50);
