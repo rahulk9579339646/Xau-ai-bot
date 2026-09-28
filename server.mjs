@@ -34,38 +34,7 @@ app.get("/gemini-test", async (req, res) => {
     if (!response.ok) {
       return res.status(502).json(data);
     }
-// -----------------------------
-// Multi-Timeframe Data
-// -----------------------------
 
-const [response15m, response1h] = await Promise.all([
-  fetch(
-    `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=100&apikey=${TWELVE_DATA_API_KEY}`
-  ),
-  fetch(
-    `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1h&outputsize=100&apikey=${TWELVE_DATA_API_KEY}`
-  )
-]);
-
-const data15m = await response15m.json();
-const data1h = await response1h.json();
-
-if (
-  data15m.status === "error" ||
-  data1h.status === "error"
-) {
-  return res.status(502).json({
-    success: false,
-    error: "Multi-timeframe data fetch failed",
-    fifteenMinute: data15m,
-    oneHour: data1h
-  });
-}
-
-
-  }))
-  .reverse();
-    
     res.json({
       success: true,
       answer: data.steps?.find(s => s.type === "model_output")?.content?.find(c => c.type === "text")?.text || "No output returned"
@@ -311,137 +280,7 @@ app.get("/technical-analysis", async (req, res) => {
     }
 
     const latest = candles[candles.length - 1];
-// -----------------------------
-// EMA Calculation
-// -----------------------------
 
-function calculateEMA(values, period) {
-  if (values.length < period) return null;
-
-  const multiplier = 2 / (period + 1);
-
-  let ema =
-    values
-      .slice(0, period)
-      .reduce((sum, value) => sum + value, 0) / period;
-
-  for (let i = period; i < values.length; i++) {
-    ema =
-      (values[i] - ema) * multiplier + ema;
-  }
-
-  return ema;
-}
-
-const closes = candles.map(c => c.close);
-    
-const EMA9 = calculateEMA(closes, 9);
-const EMA21 = calculateEMA(closes, 21);
-const EMA50 = calculateEMA(closes, 50);
-
-// -----------------------------
-// RSI Calculation
-// -----------------------------
-
-function calculateRSI(values, period = 14) {
-  if (values.length <= period) return null;
-
-  let gains = 0;
-  let losses = 0;
-
-  for (let i = 1; i <= period; i++) {
-    const change = values[i] - values[i - 1];
-
-    if (change > 0) {
-      gains += change;
-    } else {
-      losses += Math.abs(change);
-    }
-  }
-
-  let averageGain = gains / period;
-  let averageLoss = losses / period;
-
-  for (let i = period + 1; i < values.length; i++) {
-    const change = values[i] - values[i - 1];
-
-    const gain = change > 0 ? change : 0;
-    const loss = change < 0 ? Math.abs(change) : 0;
-
-    averageGain =
-      (averageGain * (period - 1) + gain) / period;
-
-    averageLoss =
-      (averageLoss * (period - 1) + loss) / period;
-  }
-
-  if (averageLoss === 0) return 100;
-
-  const RS = averageGain / averageLoss;
-
-  return 100 - (100 / (1 + RS));
-}
-
-const RSI14 = calculateRSI(closes, 14);
-
-// -----------------------------
-// Trend
-// -----------------------------
-
-let trend = "Neutral";
-
-if (EMA9 && EMA21 && EMA50) {
-
-  if (
-    EMA9 > EMA21 &&
-    EMA21 > EMA50 &&
-    latest.close > EMA9
-  ) {
-    trend = "Strong Bullish";
-  }
-
-  else if (
-    EMA9 < EMA21 &&
-    EMA21 < EMA50 &&
-    latest.close < EMA9
-  ) {
-    trend = "Strong Bearish";
-  }
-
-  else if (EMA9 > EMA21) {
-    trend = "Bullish";
-  }
-
-  else if (EMA9 < EMA21) {
-    trend = "Bearish";
-  }
-}
-
-// -----------------------------
-// RSI Momentum
-// -----------------------------
-
-let momentum = "Neutral";
-
-if (RSI14 !== null) {
-
-  if (RSI14 >= 70) {
-    momentum = "Overbought";
-  }
-
-  else if (RSI14 <= 30) {
-    momentum = "Oversold";
-  }
-
-  else if (RSI14 > 55) {
-    momentum = "Bullish Momentum";
-  }
-
-  else if (RSI14 < 45) {
-    momentum = "Bearish Momentum";
-  }
-}
-    
     const previousSwingHigh =
       swingHighs[swingHighs.length - 1];
 
@@ -529,86 +368,6 @@ const candleDirection =
     : latest.close < latest.open
       ? "Bearish"
       : "Doji";
-// -----------------------------
-// Candlestick Pattern Detection
-// -----------------------------
-
-const body = Math.abs(latest.close - latest.open);
-const upperWick = latest.high - Math.max(latest.open, latest.close);
-const lowerWick = Math.min(latest.open, latest.close) - latest.low;
-
-let candlestickPattern = "None";
-
-// Doji
-if (
-  candleRange > 0 &&
-  body / candleRange <= 0.10
-) {
-  candlestickPattern = "Doji";
-}
-
-// Hammer
-else if (
-  lowerWick >= body * 2 &&
-  upperWick <= body &&
-  latest.close >= latest.open
-) {
-  candlestickPattern = "Hammer";
-}
-
-// Shooting Star
-else if (
-  upperWick >= body * 2 &&
-  lowerWick <= body &&
-  latest.close <= latest.open
-) {
-  candlestickPattern = "Shooting Star";
-}
-
-// Bullish Engulfing
-else if (candles.length >= 2) {
-
-  const previous = candles[candles.length - 2];
-
-  if (
-    previous.close < previous.open &&
-    latest.close > latest.open &&
-    latest.open <= previous.close &&
-    latest.close >= previous.open
-  ) {
-    candlestickPattern = "Bullish Engulfing";
-  }
-}
-
-// Bearish Engulfing
-if (candles.length >= 2) {
-
-  const previous = candles[candles.length - 2];
-
-  if (
-    previous.close > previous.open &&
-    latest.close < latest.open &&
-    latest.open >= previous.close &&
-    latest.close <= previous.open
-  ) {
-    candlestickPattern = "Bearish Engulfing";
-  }
-}
-
-// Pin Bar
-if (
-  candleRange > 0 &&
-  body / candleRange <= 0.30
-) {
-
-  if (lowerWick >= body * 2) {
-    candlestickPattern = "Bullish Pin Bar";
-  }
-
-  else if (upperWick >= body * 2) {
-    candlestickPattern = "Bearish Pin Bar";
-  }
-}
     
     // -----------------------------
     // Liquidity Sweep
@@ -736,24 +495,11 @@ for (let i = 1; i < candles.length; i++) {
 CHoCH,
 
   MSS,
-EMA: {
-    EMA9,
-    EMA21,
-    EMA50
-  },
 
-  RSI14,
+  candleStrength,
 
-  trend,
-
-  momentum,
-      
-  candleStrength,    
-   
   candleDirection,
 
-  candlestickPattern,
-      
   candleRange,
 
   candleBody,
@@ -770,12 +516,12 @@ fvg: {
         bullish: bullishOrderBlocks.slice(-5),
         bearish: bearishOrderBlocks.slice(-5)
       },
-swingHighs: swingHighs.slice(-10),
-
-swingLows: swingLows.slice(-10),
-
-});
       
+      swingHighs: swingHighs.slice(-10),
+
+      swingLows: swingLows.slice(-10)
+    });
+
   } catch (error) {
     res.status(500).json({
       success: false,
