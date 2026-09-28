@@ -34,7 +34,54 @@ app.get("/gemini-test", async (req, res) => {
     if (!response.ok) {
       return res.status(502).json(data);
     }
+// -----------------------------
+// Multi-Timeframe Data
+// -----------------------------
 
+const [response15m, response1h] = await Promise.all([
+  fetch(
+    `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=100&apikey=${TWELVE_DATA_API_KEY}`
+  ),
+  fetch(
+    `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1h&outputsize=100&apikey=${TWELVE_DATA_API_KEY}`
+  )
+]);
+
+const data15m = await response15m.json();
+const data1h = await response1h.json();
+
+if (
+  data15m.status === "error" ||
+  data1h.status === "error"
+) {
+  return res.status(502).json({
+    success: false,
+    error: "Multi-timeframe data fetch failed",
+    fifteenMinute: data15m,
+    oneHour: data1h
+  });
+}
+
+const candles15m = data15m.values
+  .map(c => ({
+    time: c.datetime,
+    open: Number(c.open),
+    high: Number(c.high),
+    low: Number(c.low),
+    close: Number(c.close)
+  }))
+  .reverse();
+
+const candles1h = data1h.values
+  .map(c => ({
+    time: c.datetime,
+    open: Number(c.open),
+    high: Number(c.high),
+    low: Number(c.low),
+    close: Number(c.close)
+  }))
+  .reverse();
+    
     res.json({
       success: true,
       answer: data.steps?.find(s => s.type === "model_output")?.content?.find(c => c.type === "text")?.text || "No output returned"
@@ -744,7 +791,34 @@ fvg: {
 
       swingLows: swingLows.slice(-10)
     });
+multiTimeframe: {
 
+  "5m": {
+    trend: trend,
+    EMA9: EMA9,
+    EMA21: EMA21,
+    EMA50: EMA50,
+    close: latest.close
+  },
+
+  "15m": {
+    trend: trend15m,
+    EMA9: EMA9_15m,
+    EMA21: EMA21_15m,
+    EMA50: EMA50_15m,
+    close: latest15m.close
+  },
+
+  "1h": {
+    trend: trend1h,
+    EMA9: EMA9_1h,
+    EMA21: EMA21_1h,
+    EMA50: EMA50_1h,
+    close: latest1h.close
+  }
+
+    }
+    
   } catch (error) {
     res.status(500).json({
       success: false,
