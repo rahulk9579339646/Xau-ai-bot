@@ -7,7 +7,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
+const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 app.get("/", (req, res) => {
   res.send("XAU AI BOT IS ONLINE");
 });
@@ -123,6 +123,32 @@ XAUUSD Gold
       success: true,
       instrument: "XAUUSD",
       answer
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+app.get("/gold-data", async (req, res) => {
+  try {
+    const response = await fetch(
+      `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=5min&outputsize=50&apikey=${TWELVE_DATA_API_KEY}`
+    );
+
+    const data = await response.json();
+
+    if (!response.ok || data.status === "error") {
+      return res.status(502).json(data);
+    }
+
+    res.json({
+      success: true,
+      instrument: "XAUUSD",
+      interval: "5min",
+      candles: data.values
     });
 
   } catch (error) {
