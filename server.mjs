@@ -306,7 +306,69 @@ app.get("/technical-analysis", async (req, res) => {
     ) {
       BOS = "Bearish BOS";
     }
+// -----------------------------
+// CHoCH / MSS Detection
+// -----------------------------
 
+let CHoCH = "None";
+let MSS = "None";
+
+if (swingHighs.length >= 2 && swingLows.length >= 2) {
+
+  const lastHigh = swingHighs[swingHighs.length - 1];
+  const previousHigh = swingHighs[swingHighs.length - 2];
+
+  const lastLow = swingLows[swingLows.length - 1];
+  const previousLow = swingLows[swingLows.length - 2];
+
+  // Bearish structure -> Bullish change
+  if (
+    lastLow.price < previousLow.price &&
+    latest.close > lastHigh.price
+  ) {
+    CHoCH = "Bullish CHoCH";
+    MSS = "Bullish MSS";
+  }
+
+  // Bullish structure -> Bearish change
+  if (
+    lastHigh.price > previousHigh.price &&
+    latest.close < lastLow.price
+  ) {
+    CHoCH = "Bearish CHoCH";
+    MSS = "Bearish MSS";
+  }
+}
+
+// -----------------------------
+// Candle Strength / Displacement
+// -----------------------------
+
+const candleRange = latest.high - latest.low;
+const candleBody = Math.abs(latest.close - latest.open);
+
+let candleStrength = "Normal";
+
+if (candleRange > 0) {
+
+  const bodyRatio = candleBody / candleRange;
+
+  if (bodyRatio >= 0.70) {
+    candleStrength = "Strong Displacement";
+  } else if (bodyRatio >= 0.50) {
+    candleStrength = "Moderate";
+  } else {
+    candleStrength = "Weak / Indecision";
+  }
+}
+
+const candleDirection =
+  latest.close > latest.open
+    ? "Bullish"
+    : latest.close < latest.open
+      ? "Bearish"
+      : "Doji";
+    
     // -----------------------------
     // Liquidity Sweep
     // -----------------------------
@@ -430,7 +492,18 @@ for (let i = 1; i < candles.length; i++) {
       BOS,
 
       liquiditySweep,
+CHoCH,
 
+  MSS,
+
+  candleStrength,
+
+  candleDirection,
+
+  candleRange,
+
+  candleBody,
+      
       support,
 
       resistance,
