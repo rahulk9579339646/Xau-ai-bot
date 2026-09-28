@@ -7,9 +7,11 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
 app.get("/", (req, res) => {
   res.send("XAU AI BOT IS ONLINE");
 });
+
 app.get("/gemini-test", async (req, res) => {
   try {
     const response = await fetch(
@@ -35,7 +37,7 @@ app.get("/gemini-test", async (req, res) => {
 
     res.json({
       success: true,
-      answer: data.output_text || "No output returned"
+      answer: data.steps?.find(s => s.type === "model_output")?.content?.find(c => c.type === "text")?.text || "No output returned"
     });
   } catch (error) {
     res.status(500).json({
