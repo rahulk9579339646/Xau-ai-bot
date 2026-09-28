@@ -280,7 +280,137 @@ app.get("/technical-analysis", async (req, res) => {
     }
 
     const latest = candles[candles.length - 1];
+// -----------------------------
+// EMA Calculation
+// -----------------------------
 
+function calculateEMA(values, period) {
+  if (values.length < period) return null;
+
+  const multiplier = 2 / (period + 1);
+
+  let ema =
+    values
+      .slice(0, period)
+      .reduce((sum, value) => sum + value, 0) / period;
+
+  for (let i = period; i < values.length; i++) {
+    ema =
+      (values[i] - ema) * multiplier + ema;
+  }
+
+  return ema;
+}
+
+const closes = candles.map(c => c.close);
+
+const EMA9 = calculateEMA(closes, 9);
+const EMA21 = calculateEMA(closes, 21);
+const EMA50 = calculateEMA(closes, 50);
+
+// -----------------------------
+// RSI Calculation
+// -----------------------------
+
+function calculateRSI(values, period = 14) {
+  if (values.length <= period) return null;
+
+  let gains = 0;
+  let losses = 0;
+
+  for (let i = 1; i <= period; i++) {
+    const change = values[i] - values[i - 1];
+
+    if (change > 0) {
+      gains += change;
+    } else {
+      losses += Math.abs(change);
+    }
+  }
+
+  let averageGain = gains / period;
+  let averageLoss = losses / period;
+
+  for (let i = period + 1; i < values.length; i++) {
+    const change = values[i] - values[i - 1];
+
+    const gain = change > 0 ? change : 0;
+    const loss = change < 0 ? Math.abs(change) : 0;
+
+    averageGain =
+      (averageGain * (period - 1) + gain) / period;
+
+    averageLoss =
+      (averageLoss * (period - 1) + loss) / period;
+  }
+
+  if (averageLoss === 0) return 100;
+
+  const RS = averageGain / averageLoss;
+
+  return 100 - (100 / (1 + RS));
+}
+
+const RSI14 = calculateRSI(closes, 14);
+
+// -----------------------------
+// Trend
+// -----------------------------
+
+let trend = "Neutral";
+
+if (EMA9 && EMA21 && EMA50) {
+
+  if (
+    EMA9 > EMA21 &&
+    EMA21 > EMA50 &&
+    latest.close > EMA9
+  ) {
+    trend = "Strong Bullish";
+  }
+
+  else if (
+    EMA9 < EMA21 &&
+    EMA21 < EMA50 &&
+    latest.close < EMA9
+  ) {
+    trend = "Strong Bearish";
+  }
+
+  else if (EMA9 > EMA21) {
+    trend = "Bullish";
+  }
+
+  else if (EMA9 < EMA21) {
+    trend = "Bearish";
+  }
+}
+
+// -----------------------------
+// RSI Momentum
+// -----------------------------
+
+let momentum = "Neutral";
+
+if (RSI14 !== null) {
+
+  if (RSI14 >= 70) {
+    momentum = "Overbought";
+  }
+
+  else if (RSI14 <= 30) {
+    momentum = "Oversold";
+  }
+
+  else if (RSI14 > 55) {
+    momentum = "Bullish Momentum";
+  }
+
+  else if (RSI14 < 45) {
+    momentum = "Bearish Momentum";
+  }
+}
+    
     const previousSwingHigh =
       swingHighs[swingHighs.length - 1];
 
@@ -495,7 +625,18 @@ for (let i = 1; i < candles.length; i++) {
 CHoCH,
 
   MSS,
+EMA: {
+    EMA9,
+    EMA21,
+    EMA50
+  },
 
+  RSI14,
+
+  trend,
+
+  momentum,
+      
   candleStrength,
 
   candleDirection,
