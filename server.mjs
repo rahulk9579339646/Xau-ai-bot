@@ -48,28 +48,74 @@ app.get("/gemini-test", async (req, res) => {
 });
 app.get("/analyze", async (req, res) => {
   try {
+    // 1. Get Gold 5-minute candles from Twelve Data
+    const marketResponse = await fetch(
+      `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=5min&outputsize=50&apikey=${TWELVE_DATA_API_KEY}`
+    );
+
+    const marketData = await marketResponse.json();
+
+    if (!marketResponse.ok || marketData.status === "error") {
+      return res.status(502).json({
+        success: false,
+        source: "Twelve Data",
+        error: marketData
+      });
+    }
+
+    // 2. Convert candles into readable text for Gemini
+    const candles = marketData.values
+      .map(c =>
+        `${c.datetime} | O:${c.open} H:${c.high} L:${c.low} C:${c.close}`
+      )
+      .join("\n");
+
+    // 3. Send market data to Gemini
     const prompt = `
-You are an advanced XAUUSD (Gold) market analysis AI.
+You are an advanced XAUUSD Gold market analysis AI.
 
-Analyze the current market information provided by the user.
+Analyze ONLY the market data provided below.
+Do NOT invent prices, indicators, patterns, liquidity or market structure
+that cannot reasonably be derived from the supplied OHLC candles.
 
-Use these frameworks when data is available:
-1. Market Structure
-2. BOS / CHoCH / MSS
-3. Liquidity and Liquidity Sweeps
-4. Support and Resistance
-5. Supply and Demand
-6. Order Blocks
-7. Fair Value Gaps
-8. Price Action
-9. Candlestick Patterns
-10. EMA / RSI / Volume
-11. Trendlines
-12. Risk and invalidation levels
+Instrument: XAUUSD
+Timeframe: 5 minutes
 
-Do not invent market data that is not provided.
+Analyze:
 
-Return the analysis in this format:
+1. Market Bias
+2. Market Structure
+3. BOS / CHoCH / MSS
+4. Liquidity and Liquidity Sweeps
+5. Support
+6. Resistance
+7. Supply and Demand
+8. Order Blocks
+9. Fair Value Gaps
+10. Price Action
+11. Candlestick Patterns
+12. Trend
+13. EMA-style trend assessment from price data
+14. RSI-style momentum assessment from price data
+15. Volume - only if volume data is actually available
+16. Key Levels
+17. Bullish Scenario
+18. Bearish Scenario
+19. Possible Entry Zone
+20. Stop Loss Zone
+21. Take Profit Zones
+22. Invalidation
+23. Risk Warning
+
+Important:
+- Clearly separate confirmed observations from possible interpretations.
+- If a condition cannot be determined from the available data, write "Insufficient data".
+- Do not give false certainty.
+- Do not claim that a trade is guaranteed.
+- Use the latest candle as the current reference.
+- Explain why a BOS, CHoCH, MSS, liquidity sweep, OB or FVG is identified.
+
+Return the analysis in this exact format:
 
 Market Bias:
 Market Structure:
@@ -77,18 +123,29 @@ BOS/CHoCH/MSS:
 Liquidity:
 Support:
 Resistance:
+Supply/Demand:
 Order Block:
 FVG:
+Price Action:
 Candlestick:
-Indicators:
+Trend:
+EMA:
+RSI/Momentum:
+Volume:
 Key Levels:
+
 Bullish Scenario:
 Bearish Scenario:
+
+Possible Entry Zone:
+Stop Loss:
+Take Profit:
 Invalidation:
+
 Risk Warning:
 
-User market data:
-XAUUSD Gold
+GOLD 5-MINUTE OHLC DATA:
+${candles}
 `;
 
     const response = await fetch(
@@ -122,6 +179,8 @@ XAUUSD Gold
     res.json({
       success: true,
       instrument: "XAUUSD",
+      timeframe: "5min",
+      candles_used: marketData.values.length,
       answer
     });
 
