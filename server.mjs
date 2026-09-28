@@ -340,7 +340,81 @@ app.get("/technical-analysis", async (req, res) => {
     const resistance = swingHighs
       .slice(-3)
       .map(x => x.price);
+// -----------------------------
+// Fair Value Gap (FVG)
+// -----------------------------
 
+const bullishFVGs = [];
+const bearishFVGs = [];
+
+for (let i = 2; i < candles.length; i++) {
+
+  const first = candles[i - 2];
+  const middle = candles[i - 1];
+  const third = candles[i];
+
+  // Bullish FVG
+  if (third.low > first.high) {
+    bullishFVGs.push({
+      time: third.time,
+      type: "Bullish FVG",
+      lower: first.high,
+      upper: third.low
+    });
+  }
+
+  // Bearish FVG
+  if (third.high < first.low) {
+    bearishFVGs.push({
+      time: third.time,
+      type: "Bearish FVG",
+      lower: third.high,
+      upper: first.low
+    });
+  }
+}
+
+// -----------------------------
+// Order Block
+// -----------------------------
+
+const bullishOrderBlocks = [];
+const bearishOrderBlocks = [];
+
+for (let i = 1; i < candles.length; i++) {
+
+  const previous = candles[i - 1];
+  const current = candles[i];
+
+  // Previous bearish candle followed by strong bullish move
+  if (
+    previous.close < previous.open &&
+    current.close > current.open &&
+    current.close > previous.high
+  ) {
+    bullishOrderBlocks.push({
+      time: previous.time,
+      type: "Bullish Order Block",
+      high: previous.high,
+      low: previous.low
+    });
+  }
+
+  // Previous bullish candle followed by strong bearish move
+  if (
+    previous.close > previous.open &&
+    current.close < current.open &&
+    current.close < previous.low
+  ) {
+    bearishOrderBlocks.push({
+      time: previous.time,
+      type: "Bearish Order Block",
+      high: previous.high,
+      low: previous.low
+    });
+  }
+}
+    
     res.json({
       success: true,
       instrument: "XAUUSD",
@@ -360,7 +434,16 @@ app.get("/technical-analysis", async (req, res) => {
       support,
 
       resistance,
+fvg: {
+        bullish: bullishFVGs.slice(-5),
+        bearish: bearishFVGs.slice(-5)
+      },
 
+      orderBlocks: {
+        bullish: bullishOrderBlocks.slice(-5),
+        bearish: bearishOrderBlocks.slice(-5)
+      },
+      
       swingHighs: swingHighs.slice(-10),
 
       swingLows: swingLows.slice(-10)
