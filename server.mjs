@@ -807,31 +807,6 @@ swingHighs: swingHighs.slice(-10),
 
 swingLows: swingLows.slice(-10),
 
-multiTimeframe: {
-
-  "5m": {
-    trend: trend,
-    EMA9: EMA9,
-    EMA21: EMA21,
-    EMA50: EMA50,
-    close: latest.close
-  },
-
-  "15m": {
-    EMA9: EMA9_15m,
-    EMA21: EMA21_15m,
-    EMA50: EMA50_15m,
-    close: latest15m.close
-  },
-
-  "1h": {
-    EMA9: EMA9_1h,
-    EMA21: EMA21_1h,
-    EMA50: EMA50_1h,
-    close: latest1h.close
-  }
-
-}
 });
       
   } catch (error) {
