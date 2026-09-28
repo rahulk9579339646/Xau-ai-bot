@@ -791,7 +791,8 @@ fvg: {
 
       swingLows: swingLows.slice(-10)
     });
-multiTimeframe: {
+
+    multiTimeframe: {
 
   "5m": {
     trend: trend,
@@ -817,8 +818,7 @@ multiTimeframe: {
     close: latest1h.close
   }
 
-    }
-    
+}
   } catch (error) {
     res.status(500).json({
       success: false,
