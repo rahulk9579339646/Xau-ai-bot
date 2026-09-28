@@ -786,13 +786,11 @@ fvg: {
         bullish: bullishOrderBlocks.slice(-5),
         bearish: bearishOrderBlocks.slice(-5)
       },
-      
-      swingHighs: swingHighs.slice(-10),
+swingHighs: swingHighs.slice(-10),
 
-      swingLows: swingLows.slice(-10)
-    });
+swingLows: swingLows.slice(-10),
 
-    multiTimeframe: {
+multiTimeframe: {
 
   "5m": {
     trend: trend,
@@ -819,6 +817,8 @@ fvg: {
   }
 
 }
+});
+      
   } catch (error) {
     res.status(500).json({
       success: false,
