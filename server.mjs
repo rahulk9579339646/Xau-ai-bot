@@ -7,7 +7,6 @@ const PORT = process.env.PORT || 10000;
 
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID =
@@ -264,7 +263,7 @@ function buildTelegramMessage(mtf) {
       `\nBullish Reasons:\n` +
       entry.bullishReasons
         .slice(0, 8)
-        .map(x => `• ${x}`)
+        .map(x => `â€¢ ${x}`)
         .join("\n") +
       "\n";
   }
@@ -276,7 +275,7 @@ function buildTelegramMessage(mtf) {
       `\nBearish Reasons:\n` +
       entry.bearishReasons
         .slice(0, 8)
-        .map(x => `• ${x}`)
+        .map(x => `â€¢ ${x}`)
         .join("\n") +
       "\n";
   }
@@ -1011,27 +1010,34 @@ function candleAnalysis(
   }
 
   const atrValue =
-    atr(candles, 14) ||
-    0;
+    atr(candles, 14);
 
-  const displacement =
-    atrValue > 0 &&
+  let displacement =
+    "None";
+
+  if (
+    atrValue &&
     range >=
-      atrValue * 0.85 &&
-    bodyRatio >= 0.50;
+      atrValue * 1.2 &&
+    bodyRatio >= 0.65
+  ) {
+    displacement =
+      bullish
+        ? "Bullish Displacement"
+        : bearish
+          ? "Bearish Displacement"
+          : "None";
+  }
 
   return {
-    open: c.open,
-    high: c.high,
-    low: c.low,
-    close: c.close,
-
     direction:
       bullish
         ? "Bullish"
         : bearish
           ? "Bearish"
           : "Neutral",
+
+    strength,
 
     body:
       round(body, 5),
@@ -1048,14 +1054,9 @@ function candleAnalysis(
     lowerWick:
       round(lowerWick, 5),
 
-    strength,
-
     patterns,
 
-    displacement:
-      displacement
-        ? "Displacement"
-        : "None"
+    displacement
   };
 }
 
@@ -1063,89 +1064,143 @@ function candleAnalysis(
    LIQUIDITY
 ========================================================= */
 
+function clusterLevels(
+  values,
+  tolerance
+) {
+  const sorted =
+    [...values].sort(
+      (a, b) => a - b
+    );
+
+  const clusters = [];
+
+  for (
+    const value of sorted
+  ) {
+    const existing =
+      clusters.find(
+        c =>
+          Math.abs(
+            c.price - value
+          ) <= tolerance
+      );
+
+    if (existing) {
+      existing.values.push(
+        value
+      );
+
+      existing.price =
+        avg(
+          existing.values
+        );
+
+      existing.count++;
+    } else {
+      clusters.push({
+        price: value,
+        values: [value],
+        count: 1
+      });
+    }
+  }
+
+  return clusters
+    .filter(
+      x => x.count >= 2
+    )
+    .sort(
+      (a, b) =>
+        b.count - a.count
+    )
+    .slice(0, 10)
+    .map(x => ({
+      price:
+        round(
+          x.price,
+          5
+        ),
+      count:
+        x.count
+    }));
+}
+
 function liquidityAnalysis(
   candles
 ) {
-  const swings =
-    detectSwings(
-      candles
+  const atrValue =
+    atr(candles, 14) ||
+    1;
+
+  const tolerance =
+    atrValue * 0.08;
+
+  const highs =
+    candles.map(
+      x => x.high
     );
 
-  const current =
-    last(candles);
+  const lows =
+    candles.map(
+      x => x.low
+    );
 
-  const previousCandle =
-    previous(candles);
+  const equalHighs =
+    clusterLevels(
+      highs,
+      tolerance
+    );
 
-  if (
-    !current ||
-    !previousCandle
-  ) {
-    return {
-      buySideLiquidity: null,
-      sellSideLiquidity: null,
-      latestSweep: "None"
-    };
-  }
-
-  const recentHighs =
-    swings.highs.slice(-5);
-
-  const recentLows =
-    swings.lows.slice(-5);
-
-  const latestHigh =
-    last(recentHighs);
-
-  const latestLow =
-    last(recentLows);
+  const equalLows =
+    clusterLevels(
+      lows,
+      tolerance
+    );
 
   let latestSweep =
     "None";
 
-  if (
-    latestLow &&
-    current.low <
-      latestLow.price &&
-    current.close >
-      latestLow.price
-  ) {
-    latestSweep =
-      "Bullish Liquidity Sweep";
-  }
+  const recent =
+    candles.slice(-8);
 
-  if (
-    latestHigh &&
-    current.high >
-      latestHigh.price &&
-    current.close <
-      latestHigh.price
+  for (
+    const c of recent
   ) {
-    latestSweep =
-      "Bearish Liquidity Sweep";
+    const sweptHigh =
+      equalHighs.some(
+        x =>
+          c.high >
+            x.price +
+            tolerance * 0.25 &&
+          c.close <
+            x.price
+      );
+
+    const sweptLow =
+      equalLows.some(
+        x =>
+          c.low <
+            x.price -
+            tolerance * 0.25 &&
+          c.close >
+            x.price
+      );
+
+    if (sweptHigh) {
+      latestSweep =
+        "Bearish Liquidity Sweep";
+    }
+
+    if (sweptLow) {
+      latestSweep =
+        "Bullish Liquidity Sweep";
+    }
   }
 
   return {
-    buySideLiquidity:
-      latestHigh
-        ? {
-            price:
-              latestHigh.price,
-            time:
-              latestHigh.time
-          }
-        : null,
-
-    sellSideLiquidity:
-      latestLow
-        ? {
-            price:
-              latestLow.price,
-            time:
-              latestLow.time
-          }
-        : null,
-
+    equalHighs,
+    equalLows,
     latestSweep
   };
 }
@@ -1154,8 +1209,9 @@ function liquidityAnalysis(
    FVG
 ========================================================= */
 
-function fvgAnalysis(
-  candles
+function findFVG(
+  candles,
+  maxZones = 8
 ) {
   const bullish = [];
   const bearish = [];
@@ -1168,249 +1224,185 @@ function fvgAnalysis(
     const a =
       candles[i - 2];
 
-    const b =
-      candles[i - 1];
-
     const c =
       candles[i];
 
     if (
-      c.low >
-      a.high
+      a.high <
+      c.low
     ) {
       bullish.push({
-        type:
-          "Bullish FVG",
-
         low:
-          a.high,
+          round(
+            a.high,
+            5
+          ),
 
         high:
-          c.low,
+          round(
+            c.low,
+            5
+          ),
 
-        createdAt:
-          b.time
+        index: i,
+
+        time:
+          candles[
+            i - 1
+          ].time
       });
     }
 
     if (
-      c.high <
-      a.low
+      a.low >
+      c.high
     ) {
       bearish.push({
-        type:
-          "Bearish FVG",
-
         low:
-          c.high,
+          round(
+            c.high,
+            5
+          ),
 
         high:
-          a.low,
+          round(
+            a.low,
+            5
+          ),
 
-        createdAt:
-          b.time
+        index: i,
+
+        time:
+          candles[
+            i - 1
+          ].time
       });
     }
   }
 
   return {
     bullish:
-      bullish.slice(-10),
+      bullish.slice(
+        -maxZones
+      ),
 
     bearish:
-      bearish.slice(-10)
+      bearish.slice(
+        -maxZones
+      )
   };
 }
 
 /* =========================================================
-   ORDER BLOCKS
+   ORDER BLOCK
 ========================================================= */
 
-function orderBlockAnalysis(
-  candles
+function findOrderBlocks(
+  candles,
+  maxZones = 6
 ) {
   const bullish = [];
   const bearish = [];
 
   for (
-    let i = 2;
+    let i = 1;
     i < candles.length - 1;
     i++
   ) {
-    const c =
+    const prev =
+      candles[i - 1];
+
+    const current =
       candles[i];
 
-    const next =
-      candles[i + 1];
+    const range =
+      current.high -
+      current.low;
 
     const body =
       Math.abs(
-        c.close -
-        c.open
+        current.close -
+        current.open
       );
 
-    const range =
-      c.high -
-      c.low;
+    const strongMove =
+      range > 0 &&
+      body / range >=
+        0.65;
 
-    const nextBody =
-      Math.abs(
-        next.close -
-        next.open
-      );
+    if (!strongMove) {
+      continue;
+    }
 
     if (
-      c.close <
-        c.open &&
-      next.close >
-        next.open &&
-      nextBody >
-        body * 1.2
+      prev.close <
+        prev.open &&
+      current.close >
+        current.open &&
+      current.close >
+        prev.high
     ) {
       bullish.push({
-        type:
-          "Bullish Order Block",
-
         low:
-          c.low,
+          round(
+            prev.low,
+            5
+          ),
 
         high:
-          c.high,
+          round(
+            prev.high,
+            5
+          ),
 
-        createdAt:
-          c.time
+        index:
+          i - 1,
+
+        time:
+          prev.time
       });
     }
 
     if (
-      c.close >
-        c.open &&
-      next.close <
-        next.open &&
-      nextBody >
-        body * 1.2
+      prev.close >
+        prev.open &&
+      current.close <
+        current.open &&
+      current.close <
+        prev.low
     ) {
       bearish.push({
-        type:
-          "Bearish Order Block",
-
         low:
-          c.low,
+          round(
+            prev.low,
+            5
+          ),
 
         high:
-          c.high,
+          round(
+            prev.high,
+            5
+          ),
 
-        createdAt:
-          c.time
+        index:
+          i - 1,
+
+        time:
+          prev.time
       });
     }
   }
 
   return {
     bullish:
-      bullish.slice(-10),
+      bullish.slice(
+        -maxZones
+      ),
 
     bearish:
-      bearish.slice(-10)
-  };
-}
-
-/* =========================================================
-   SUPPLY / DEMAND
-========================================================= */
-
-function supplyDemandAnalysis(
-  candles
-) {
-  const bullish = [];
-  const bearish = [];
-
-  const recent =
-    candles.slice(-80);
-
-  for (
-    let i = 2;
-    i < recent.length - 2;
-    i++
-  ) {
-    const c =
-      recent[i];
-
-    const n1 =
-      recent[i + 1];
-
-    const n2 =
-      recent[i + 2];
-
-    const body =
-      Math.abs(
-        c.close -
-        c.open
-      );
-
-    const nextMove =
-      Math.abs(
-        n2.close -
-        c.close
-      );
-
-    if (
-      c.close <
-        c.open &&
-      n1.close >
-        n1.open &&
-      n2.close >
-        c.close &&
-      nextMove >
-        body * 1.5
-    ) {
-      bullish.push({
-        type:
-          "Demand Zone",
-
-        low:
-          c.low,
-
-        high:
-          c.high,
-
-        createdAt:
-          c.time
-      });
-    }
-
-    if (
-      c.close >
-        c.open &&
-      n1.close <
-        n1.open &&
-      n2.close <
-        c.close &&
-      nextMove >
-        body * 1.5
-    ) {
-      bearish.push({
-        type:
-          "Supply Zone",
-
-        low:
-          c.low,
-
-        high:
-          c.high,
-
-        createdAt:
-          c.time
-      });
-    }
-  }
-
-  return {
-    demand:
-      bullish.slice(-10),
-
-    supply:
-      bearish.slice(-10)
+      bearish.slice(
+        -maxZones
+      )
   };
 }
 
@@ -1418,148 +1410,201 @@ function supplyDemandAnalysis(
    SUPPORT / RESISTANCE
 ========================================================= */
 
-function supportResistanceAnalysis(
-  candles
+function supportResistance(
+  candles,
+  structure
 ) {
-  const swings =
-    detectSwings(
-      candles
-    );
-
-  const highs =
-    swings.highs
-      .slice(-10)
-      .map(x => x.price);
-
-  const lows =
-    swings.lows
-      .slice(-10)
-      .map(x => x.price);
-
   const current =
     last(candles);
 
-  if (!current) {
-    return {
-      support: null,
-      nextSupport: null,
-      resistance: null,
-      nextResistance: null
-    };
+  const supports = [];
+  const resistances = [];
+
+  if (
+    structure.latestSwingLow
+  ) {
+    supports.push(
+      structure
+        .latestSwingLow
+        .price
+    );
   }
 
-  const supports =
-    lows
+  if (
+    structure.previousSwingLow
+  ) {
+    supports.push(
+      structure
+        .previousSwingLow
+        .price
+    );
+  }
+
+  if (
+    structure.latestSwingHigh
+  ) {
+    resistances.push(
+      structure
+        .latestSwingHigh
+        .price
+    );
+  }
+
+  if (
+    structure.previousSwingHigh
+  ) {
+    resistances.push(
+      structure
+        .previousSwingHigh
+        .price
+    );
+  }
+
+  const below =
+    supports
       .filter(
         x =>
           x <
           current.close
       )
       .sort(
-        (a, b) =>
-          b - a
+        (a, b) => b - a
       );
 
-  const resistances =
-    highs
+  const above =
+    resistances
       .filter(
         x =>
           x >
           current.close
       )
       .sort(
-        (a, b) =>
-          a - b
+        (a, b) => a - b
       );
 
   return {
+    currentPrice:
+      round(
+        current.close,
+        5
+      ),
+
     support:
-      supports[0] ??
+      below[0] ??
       null,
 
     nextSupport:
-      supports[1] ??
+      below[1] ??
       null,
 
     resistance:
-      resistances[0] ??
+      above[0] ??
       null,
 
     nextResistance:
-      resistances[1] ??
+      above[1] ??
       null
   };
 }
 
 /* =========================================================
-   TREND
+   SUPPLY / DEMAND
 ========================================================= */
 
-function trendAnalysis(
-  candles
+function findSupplyDemand(
+  candles,
+  maxZones = 6
 ) {
-  const closes =
-    candles.map(
-      x => x.close
-    );
+  const demand = [];
+  const supply = [];
 
-  const e9 =
-    ema(closes, 9);
-
-  const e21 =
-    ema(closes, 21);
-
-  const e50 =
-    ema(closes, 50);
-
-  const current =
-    last(candles);
-
-  if (
-    !current ||
-    !Number.isFinite(e9) ||
-    !Number.isFinite(e21)
+  for (
+    let i = 2;
+    i < candles.length - 1;
+    i++
   ) {
-    return {
-      trend:
-        "Unknown",
+    const a =
+      candles[i - 1];
 
-      EMA9: e9,
-      EMA21: e21,
-      EMA50: e50
-    };
-  }
+    const b =
+      candles[i];
 
-  let trend =
-    "Sideways";
+    const range =
+      b.high - b.low;
 
-  if (
-    current.close > e9 &&
-    e9 > e21
-  ) {
-    trend =
-      "Bullish";
-  }
+    const body =
+      Math.abs(
+        b.close -
+        b.open
+      );
 
-  if (
-    current.close < e9 &&
-    e9 < e21
-  ) {
-    trend =
-      "Bearish";
+    if (
+      !range ||
+      body / range <
+        0.55
+    ) {
+      continue;
+    }
+
+    if (
+      b.close >
+        b.open &&
+      b.close >
+        a.high
+    ) {
+      demand.push({
+        low:
+          round(
+            a.low,
+            5
+          ),
+
+        high:
+          round(
+            a.high,
+            5
+          ),
+
+        time:
+          a.time
+      });
+    }
+
+    if (
+      b.close <
+        b.open &&
+      b.close <
+        a.low
+    ) {
+      supply.push({
+        low:
+          round(
+            a.low,
+            5
+          ),
+
+        high:
+          round(
+            a.high,
+            5
+          ),
+
+        time:
+          a.time
+      });
+    }
   }
 
   return {
-    trend,
+    demand:
+      demand.slice(
+        -maxZones
+      ),
 
-    EMA9:
-      round(e9, 5),
-
-    EMA21:
-      round(e21, 5),
-
-    EMA50:
-      round(e50, 5)
+    supply:
+      supply.slice(
+        -maxZones
+      )
   };
 }
 
@@ -1579,64 +1624,192 @@ function volumeAnalysis(
         Number.isFinite
       );
 
-  const current =
-    last(candles);
-
   if (
-    !current ||
-    !volumes.length
+    volumes.length <
+    20
   ) {
     return {
       available: false,
-      currentVolume: null,
-      averageVolume: null,
-      state:
-        "Unavailable"
+
+      message:
+        "Volume unavailable from data source"
     };
   }
 
-  const averageVolume =
+  const current =
+    last(volumes);
+
+  const average =
     avg(
-      volumes.slice(-20)
+      volumes.slice(
+        -20
+      )
     );
 
-  const currentVolume =
-    current.volume;
+  return {
+    available: true,
 
-  let state =
-    "Normal";
+    current:
+      round(
+        current,
+        2
+      ),
+
+    average20:
+      round(
+        average,
+        2
+      ),
+
+    ratio:
+      round(
+        current /
+          average,
+        2
+      ),
+
+    state:
+      current >
+        average * 1.5
+        ? "High Volume"
+        : current >
+            average
+          ? "Above Average"
+          : "Normal/Low"
+  };
+}
+
+/* =========================================================
+   INDICATOR ANALYSIS
+========================================================= */
+
+function indicatorAnalysis(
+  candles
+) {
+  const closes =
+    candles.map(
+      x => x.close
+    );
+
+  const EMA9 =
+    ema(closes, 9);
+
+  const EMA21 =
+    ema(closes, 21);
+
+  const EMA50 =
+    ema(closes, 50);
+
+  const RSI14 =
+    rsi(closes, 14);
+
+  const ATR14 =
+    atr(candles, 14);
+
+  const MACD =
+    macd(closes);
+
+  let trend =
+    "Neutral";
 
   if (
-    Number.isFinite(
-      averageVolume
-    )
+    EMA9 > EMA21 &&
+    EMA21 > EMA50
   ) {
-    if (
-      currentVolume >
-      averageVolume * 1.5
-    ) {
-      state =
-        "High Volume";
-    } else if (
-      currentVolume <
-      averageVolume * 0.6
-    ) {
-      state =
-        "Low Volume";
-    }
+    trend =
+      "Strong Bullish";
+  } else if (
+    EMA9 < EMA21 &&
+    EMA21 < EMA50
+  ) {
+    trend =
+      "Strong Bearish";
+  } else if (
+    EMA9 > EMA21
+  ) {
+    trend =
+      "Bullish";
+  } else if (
+    EMA9 < EMA21
+  ) {
+    trend =
+      "Bearish";
+  }
+
+  let momentum =
+    "Neutral Momentum";
+
+  if (
+    RSI14 >= 55
+  ) {
+    momentum =
+      "Bullish Momentum";
+  } else if (
+    RSI14 <= 45
+  ) {
+    momentum =
+      "Bearish Momentum";
   }
 
   return {
-    available:
-      Number.isFinite(
-        currentVolume
+    EMA9:
+      round(
+        EMA9,
+        5
       ),
 
-    currentVolume,
+    EMA21:
+      round(
+        EMA21,
+        5
+      ),
 
-    averageVolume,
+    EMA50:
+      round(
+        EMA50,
+        5
+      ),
 
-    state
+    RSI14:
+      round(
+        RSI14,
+        2
+      ),
+
+    ATR14:
+      round(
+        ATR14,
+        5
+      ),
+
+    MACD:
+      MACD
+        ? {
+            line:
+              round(
+                MACD.line,
+                5
+              ),
+
+            signal:
+              round(
+                MACD.signal,
+                5
+              ),
+
+            histogram:
+              round(
+                MACD.histogram,
+                5
+              ),
+
+            bias:
+              MACD.bias
+          }
+        : null,
+
+    trend,
+    momentum
   };
 }
 
@@ -1649,7 +1822,6 @@ function zoneContains(
   price
 ) {
   return (
-    zone &&
     Number.isFinite(
       zone.low
     ) &&
@@ -1661,126 +1833,101 @@ function zoneContains(
   );
 }
 
-function relevantZonesAnalysis(
+function relevantZones(
+  candles,
   fvg,
-  orderBlocks,
-  supplyDemand,
-  price
+  ob,
+  sd
 ) {
-  const bullishFVG =
-    fvg.bullish.filter(
-      z =>
-        zoneContains(
-          z,
-          price
-        ) ||
-        Math.abs(
-          price -
-            z.high
-        ) <
-          Math.abs(
-            price *
-            0.002
-          )
-    );
+  const price =
+    last(candles).close;
 
-  const bearishFVG =
-    fvg.bearish.filter(
-      z =>
-        zoneContains(
-          z,
-          price
-        ) ||
-        Math.abs(
-          price -
-            z.low
-        ) <
-          Math.abs(
-            price *
-            0.002
-          )
-    );
+  const atrValue =
+    atr(candles, 14) ||
+    10;
 
-  const bullishOB =
-    orderBlocks.bullish.filter(
-      z =>
-        zoneContains(
-          z,
-          price
-        ) ||
-        Math.abs(
-          price -
-            z.high
-        ) <
-          Math.abs(
-            price *
-            0.002
-          )
-    );
+  const maxDistance =
+    atrValue * 4;
 
-  const bearishOB =
-    orderBlocks.bearish.filter(
-      z =>
-        zoneContains(
-          z,
-          price
-        ) ||
-        Math.abs(
-          price -
-            z.low
-        ) <
-          Math.abs(
-            price *
-            0.002
-          )
-    );
+  const clean =
+    arr =>
+      arr
+        .filter(
+          z =>
+            Number.isFinite(
+              z.low
+            ) &&
+            Number.isFinite(
+              z.high
+            )
+        )
+        .map(
+          z => ({
+            ...z,
 
-  const demand =
-    supplyDemand.demand.filter(
-      z =>
-        zoneContains(
-          z,
-          price
-        ) ||
-        Math.abs(
-          price -
-            z.high
-        ) <
-          Math.abs(
-            price *
-            0.002
-          )
-    );
-
-  const supply =
-    supplyDemand.supply.filter(
-      z =>
-        zoneContains(
-          z,
-          price
-        ) ||
-        Math.abs(
-          price -
-            z.low
-        ) <
-          Math.abs(
-            price *
-            0.002
-          )
-    );
+            distance:
+              Math.min(
+                Math.abs(
+                  price -
+                    z.low
+                ),
+                Math.abs(
+                  price -
+                    z.high
+                )
+              )
+          })
+        )
+        .filter(
+          z =>
+            z.distance <=
+            maxDistance
+        )
+        .sort(
+          (a, b) =>
+            a.distance -
+            b.distance
+        )
+        .slice(
+          0,
+          3
+        );
 
   return {
-    bullishFVG,
-    bearishFVG,
-    bullishOB,
-    bearishOB,
-    demand,
-    supply
+    bullishFVG:
+      clean(
+        fvg.bullish
+      ),
+
+    bearishFVG:
+      clean(
+        fvg.bearish
+      ),
+
+    bullishOB:
+      clean(
+        ob.bullish
+      ),
+
+    bearishOB:
+      clean(
+        ob.bearish
+      ),
+
+    demand:
+      clean(
+        sd.demand
+      ),
+
+    supply:
+      clean(
+        sd.supply
+      )
   };
 }
 
 /* =========================================================
-   TIMEFRAME ANALYSIS
+   TIMEFRAME ENGINE
 ========================================================= */
 
 function analyzeTimeframe(
@@ -1789,17 +1936,6 @@ function analyzeTimeframe(
 ) {
   const current =
     last(candles);
-
-  if (!current) {
-    throw new Error(
-      `${timeframe} candles unavailable`
-    );
-  }
-
-  const closes =
-    candles.map(
-      x => x.close
-    );
 
   const structure =
     structureAnalysis(
@@ -1812,66 +1948,40 @@ function analyzeTimeframe(
       structure
     );
 
-  const liquidity =
-    liquidityAnalysis(
-      candles
-    );
-
   const candle =
     candleAnalysis(
       candles
     );
 
-  const indicators = {
-    EMA9:
-      ema(closes, 9),
+  const liquidity =
+    liquidityAnalysis(
+      candles
+    );
 
-    EMA21:
-      ema(closes, 21),
-
-    EMA50:
-      ema(closes, 50),
-
-    RSI14:
-      rsi(closes, 14),
-
-    ATR14:
-      atr(candles, 14),
-
-    MACD:
-      macd(closes),
-
-    trend:
-      trendAnalysis(
-        candles
-      ).trend,
-
-    momentum:
-      rsi(closes, 14) > 55
-        ? "Bullish Momentum"
-        : rsi(closes, 14) < 45
-          ? "Bearish Momentum"
-          : "Neutral Momentum"
-  };
-
-  const sr =
-    supportResistanceAnalysis(
+  const indicators =
+    indicatorAnalysis(
       candles
     );
 
   const fvg =
-    fvgAnalysis(
+    findFVG(
       candles
     );
 
   const orderBlocks =
-    orderBlockAnalysis(
+    findOrderBlocks(
       candles
     );
 
   const supplyDemand =
-    supplyDemandAnalysis(
+    findSupplyDemand(
       candles
+    );
+
+  const sr =
+    supportResistance(
+      candles,
+      structure
     );
 
   const volume =
@@ -1880,11 +1990,11 @@ function analyzeTimeframe(
     );
 
   const relevant =
-    relevantZonesAnalysis(
+    relevantZones(
+      candles,
       fvg,
       orderBlocks,
-      supplyDemand,
-      current.close
+      supplyDemand
     );
 
   return {
@@ -2932,59 +3042,57 @@ async function mtfAnalysis() {
 }
 
 /* =========================================================
-   AI PROMPT
-========================================================= */
-
-function buildAIAnalysisPrompt(mtf) {
-  return `
-You are a financial market analysis assistant for XAUUSD.
-
-Analyze ONLY the supplied technical engine output. Do not invent price data, news, indicators, levels, or confirmations.
-
-Explain clearly:
-
-1. 1H bias and structure
-2. 15M bias and structure
-3. 5M bias and structure
-4. BOS / CHoCH / MSS
-5. Liquidity and liquidity sweeps
-6. FVG
-7. Order blocks
-8. Supply and demand
-9. Support and resistance
-10. Candlestick confirmation
-11. EMA / RSI / MACD / ATR / volume information when supplied
-12. Retest status
-13. Entry confirmation
-14. Entry, SL, TP and invalidation when supplied
-15. Why the engine is BUY, SELL or WAITING
-
-If confirmation is insufficient, explicitly say WAITING.
-
-Do not claim certainty or guaranteed profit.
-Do not override the technical engine's confirmed direction.
-
-DATA:
-
-${JSON.stringify(mtf, null, 2)}
-`;
-}
-
-/* =========================================================
    GEMINI AI
 ========================================================= */
 
-async function geminiAnalysis(mtf) {
-  if (!GEMINI_API_KEY) {
+async function geminiAnalysis(
+  mtf
+) {
+  if (
+    !GEMINI_API_KEY
+  ) {
     return {
       available: false,
+
       message:
         "GEMINI_API_KEY not configured"
     };
   }
 
-  const prompt =
-    buildAIAnalysisPrompt(mtf);
+  const prompt = `
+You are a financial market analysis assistant.
+
+Analyze XAUUSD using ONLY the supplied technical engine output.
+
+Do not invent price data.
+
+Explain:
+
+1. 1H bias
+2. 15M bias
+3. 5M bias
+4. Market structure
+5. BOS / CHoCH / MSS
+6. Liquidity
+7. FVG
+8. Order blocks
+9. Retest
+10. Entry confirmation
+11. Invalidation
+12. Why the engine is BUY, SELL or WAITING
+
+If confirmation is insufficient, explicitly say WAITING.
+
+Do not claim certainty or guaranteed profit.
+
+DATA:
+
+${JSON.stringify(
+  mtf,
+  null,
+  2
+)}
+`;
 
   try {
     const response =
@@ -3035,19 +3143,11 @@ async function geminiAnalysis(mtf) {
     const text =
       json.candidates?.[0]
         ?.content?.parts?.[0]
-        ?.text || null;
-
-    if (!text) {
-      return {
-        available: false,
-        error:
-          "Gemini returned no analysis"
-      };
-    }
+        ?.text ||
+      "";
 
     return {
       available: true,
-      provider: "Gemini",
       text
     };
   } catch (
@@ -3060,167 +3160,6 @@ async function geminiAnalysis(mtf) {
         error.message
     };
   }
-}
-
-/* =========================================================
-   OPENROUTER FALLBACK AI
-========================================================= */
-
-async function openRouterAnalysis(mtf) {
-  if (!OPENROUTER_API_KEY) {
-    return {
-      available: false,
-      message:
-        "OPENROUTER_API_KEY not configured"
-    };
-  }
-
-  const prompt =
-    buildAIAnalysisPrompt(mtf);
-
-  try {
-    const response =
-      await fetch(
-        "https://openrouter.ai/api/v1/chat/completions",
-        {
-          method: "POST",
-
-          headers: {
-            "Content-Type":
-              "application/json",
-
-            Authorization:
-              `Bearer ${OPENROUTER_API_KEY}`,
-
-            "HTTP-Referer":
-              "https://xau-ai-bot-1.onrender.com",
-
-            "X-Title":
-              "XAU AI Strong Market Analysis Engine"
-          },
-
-          body:
-            JSON.stringify({
-              model:
-                "openrouter/free",
-
-              messages: [
-                {
-                  role:
-                    "user",
-
-                  content:
-                    prompt
-                }
-              ]
-            })
-        }
-      );
-
-    const json =
-      await response.json();
-
-    if (
-      !response.ok
-    ) {
-      return {
-        available: false,
-
-        error:
-          json.error?.message ||
-          "OpenRouter request failed"
-      };
-    }
-
-    const text =
-      json.choices?.[0]
-        ?.message?.content ||
-      null;
-
-    if (!text) {
-      return {
-        available: false,
-
-        error:
-          "OpenRouter returned no analysis"
-      };
-    }
-
-    return {
-      available: true,
-
-      provider:
-        "OpenRouter",
-
-      model:
-        "openrouter/free",
-
-      text
-    };
-  } catch (
-    error
-  ) {
-    return {
-      available: false,
-
-      error:
-        error.message
-    };
-  }
-}
-
-/* =========================================================
-   AI FALLBACK CONTROLLER
-========================================================= */
-
-async function aiAnalysis(mtf) {
-  const gemini =
-    await geminiAnalysis(
-      mtf
-    );
-
-  if (
-    gemini?.available &&
-    gemini.text
-  ) {
-    return gemini;
-  }
-
-  console.log(
-    "Gemini unavailable. Trying OpenRouter."
-  );
-
-  const openrouter =
-    await openRouterAnalysis(
-      mtf
-    );
-
-  if (
-    openrouter?.available &&
-    openrouter.text
-  ) {
-    return openrouter;
-  }
-
-  return {
-    available: false,
-
-    provider:
-      "None",
-
-    error:
-      "Gemini and OpenRouter unavailable",
-
-    geminiError:
-      gemini?.error ||
-      gemini?.message ||
-      "Gemini unavailable",
-
-    openRouterError:
-      openrouter?.error ||
-      openrouter?.message ||
-      "OpenRouter unavailable"
-  };
 }
 
 /* =========================================================
@@ -3521,7 +3460,7 @@ function buildHourlyTelegramMessage(
   } else {
     message +=
       `\nTRADE LEVELS\n` +
-      `No confirmed trade levels — engine is still waiting.\n`;
+      `No confirmed trade levels â€” engine is still waiting.\n`;
   }
 
   if (
@@ -3533,7 +3472,7 @@ function buildHourlyTelegramMessage(
       entry.bullishReasons
         .slice(0, 8)
         .map(
-          x => `• ${x}`
+          x => `â€¢ ${x}`
         )
         .join("\n") +
 
@@ -3549,7 +3488,7 @@ function buildHourlyTelegramMessage(
       entry.bearishReasons
         .slice(0, 8)
         .map(
-          x => `• ${x}`
+          x => `â€¢ ${x}`
         )
         .join("\n") +
 
@@ -3561,7 +3500,7 @@ function buildHourlyTelegramMessage(
     ai.text
   ) {
     message +=
-      `\n${ai.provider || "AI"} ANALYSIS\n` +
+      `\nGEMINI AI\n` +
       ai.text.slice(
         0,
         3000
@@ -3569,7 +3508,7 @@ function buildHourlyTelegramMessage(
       "\n";
   } else if (ai) {
     message +=
-      `\nAI ANALYSIS\n` +
+      `\nGEMINI AI\n` +
       `Unavailable: ${
         ai.error ||
         ai.message ||
@@ -3580,17 +3519,13 @@ function buildHourlyTelegramMessage(
   return message;
 }
 
-/* =========================================================
-   HOURLY TELEGRAM SCHEDULER
-========================================================= */
-
 async function sendHourlyTelegramStatus() {
   try {
     const mtf =
       await mtfAnalysis();
 
     const ai =
-      await aiAnalysis(
+      await geminiAnalysis(
         mtf
       );
 
@@ -3664,88 +3599,6 @@ async function sendHourlyTelegramStatus() {
     };
   }
 }
-async function sendHourlyTelegramStatus() {
-  try {
-    const mtf =
-      await mtfAnalysis();
-
-    const ai =
-      await aiAnalysis(mtf);
-
-    const now =
-      new Date();
-
-    const key =
-      new Intl.DateTimeFormat(
-        "en-IN",
-        {
-          timeZone:
-            "Asia/Kolkata",
-
-          year:
-            "numeric",
-
-          month:
-            "2-digit",
-
-          day:
-            "2-digit",
-
-          hour:
-            "2-digit",
-
-          hour12:
-            false
-        }
-      ).format(now);
-
-    if (
-      lastHourlyTelegramKey ===
-      key
-    ) {
-      return;
-    }
-
-    const result =
-      await sendTelegramMessage(
-        buildHourlyTelegramMessage(
-          mtf,
-          ai
-        )
-      );
-
-    if (
-      result.sent
-    ) {
-      lastHourlyTelegramKey =
-        key;
-    }
-
-    console.log(
-      "Hourly Telegram status:",
-      result
-    );
-
-    return result;
-
-  } catch (
-    error
-  ) {
-
-    console.log(
-      "Hourly Telegram status error:",
-      error.message
-    );
-
-    return {
-      sent: false,
-
-      error:
-        error.message
-    };
-  }
-}
-
 
 /*
   First hourly status after startup.
@@ -3762,7 +3615,6 @@ setInterval(
   60 * 60 * 1000
 );
 
-
 /* =========================================================
    ROOT
 ========================================================= */
@@ -3770,9 +3622,7 @@ setInterval(
 app.get(
   "/",
   (req, res) => {
-
     res.json({
-
       success: true,
 
       bot:
@@ -3802,7 +3652,6 @@ app.get(
   }
 );
 
-
 /* =========================================================
    GOLD DATA
 ========================================================= */
@@ -3810,9 +3659,7 @@ app.get(
 app.get(
   "/gold-data",
   async (req, res) => {
-
     try {
-
       const candles =
         await getCandles(
           TF["5M"],
@@ -3823,7 +3670,6 @@ app.get(
         last(candles);
 
       res.json({
-
         success: true,
 
         instrument:
@@ -3836,22 +3682,17 @@ app.get(
         candle:
           current
       });
-
     } catch (
       error
     ) {
-
       res.status(500).json({
-
         success: false,
-
         error:
           error.message
       });
     }
   }
 );
-
 
 /* =========================================================
    TECHNICAL ANALYSIS
@@ -3860,9 +3701,7 @@ app.get(
 app.get(
   "/technical-analysis",
   async (req, res) => {
-
     try {
-
       const candles =
         await getCandles(
           TF["5M"],
@@ -3876,7 +3715,6 @@ app.get(
         );
 
       res.json({
-
         success: true,
 
         instrument:
@@ -3884,22 +3722,17 @@ app.get(
 
         analysis
       });
-
     } catch (
       error
     ) {
-
       res.status(500).json({
-
         success: false,
-
         error:
           error.message
       });
     }
   }
 );
-
 
 /* =========================================================
    MTF ANALYSIS
@@ -3908,31 +3741,24 @@ app.get(
 app.get(
   "/mtf-analysis",
   async (req, res) => {
-
     try {
-
       const result =
         await mtfAnalysis();
 
       res.json(
         result
       );
-
     } catch (
       error
     ) {
-
       res.status(500).json({
-
         success: false,
-
         error:
           error.message
       });
     }
   }
 );
-
 
 /* =========================================================
    FULL ANALYSIS + CONFIRMED TELEGRAM
@@ -3941,14 +3767,14 @@ app.get(
 app.get(
   "/analyze",
   async (req, res) => {
-
     try {
-
       const mtf =
         await mtfAnalysis();
 
       const ai =
-        await aiAnalysis(mtf);
+        await geminiAnalysis(
+          mtf
+        );
 
       let telegram =
         null;
@@ -3962,7 +3788,6 @@ app.get(
           ?.status ===
           "SELL CONFIRMED"
       ) {
-
         telegram =
           await sendTelegramMessage(
             buildTelegramMessage(
@@ -3972,7 +3797,6 @@ app.get(
       }
 
       res.json({
-
         ...mtf,
 
         AI_ANALYSIS:
@@ -3981,22 +3805,17 @@ app.get(
         TELEGRAM:
           telegram
       });
-
     } catch (
       error
     ) {
-
       res.status(500).json({
-
         success: false,
-
         error:
           error.message
       });
     }
   }
 );
-
 
 /* =========================================================
    GEMINI TEST
@@ -4005,12 +3824,9 @@ app.get(
 app.get(
   "/gemini-test",
   async (req, res) => {
-
     try {
-
       const result =
         await geminiAnalysis({
-
           instrument:
             OUTPUT_SYMBOL,
 
@@ -4019,27 +3835,21 @@ app.get(
         });
 
       res.json({
-
         success: true,
 
         result
       });
-
     } catch (
       error
     ) {
-
       res.status(500).json({
-
         success: false,
-
         error:
           error.message
       });
     }
   }
 );
-
 
 /* =========================================================
    TELEGRAM TEST
@@ -4048,44 +3858,32 @@ app.get(
 app.get(
   "/telegram-test",
   async (req, res) => {
-
     try {
-
       const result =
         await sendTelegramMessage(
-
           "XAU AI BOT\n\n" +
-
           "Telegram connection successful.\n\n" +
-
           "Chat ID: " +
-
           TELEGRAM_CHAT_ID
         );
 
       res.json({
-
         success: true,
 
         telegram:
           result
       });
-
     } catch (
       error
     ) {
-
       res.status(500).json({
-
         success: false,
-
         error:
           error.message
       });
     }
   }
 );
-
 
 /* =========================================================
    SERVER
@@ -4095,7 +3893,6 @@ app.listen(
   PORT,
   "0.0.0.0",
   () => {
-
     console.log(
       `XAU AI Strong Engine running on port ${PORT}`
     );
