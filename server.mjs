@@ -3664,16 +3664,13 @@ async function sendHourlyTelegramStatus() {
     };
   }
 }
-
 async function sendHourlyTelegramStatus() {
   try {
     const mtf =
       await mtfAnalysis();
 
     const ai =
-      await aiAnalysis(
-        mtf
-      );
+      await aiAnalysis(mtf);
 
     const now =
       new Date();
@@ -3730,9 +3727,11 @@ async function sendHourlyTelegramStatus() {
     );
 
     return result;
+
   } catch (
     error
   ) {
+
     console.log(
       "Hourly Telegram status error:",
       error.message
@@ -3740,11 +3739,13 @@ async function sendHourlyTelegramStatus() {
 
     return {
       sent: false,
+
       error:
         error.message
     };
   }
 }
+
 
 /*
   First hourly status after startup.
@@ -3761,6 +3762,7 @@ setInterval(
   60 * 60 * 1000
 );
 
+
 /* =========================================================
    ROOT
 ========================================================= */
@@ -3768,7 +3770,9 @@ setInterval(
 app.get(
   "/",
   (req, res) => {
+
     res.json({
+
       success: true,
 
       bot:
@@ -3798,6 +3802,7 @@ app.get(
   }
 );
 
+
 /* =========================================================
    GOLD DATA
 ========================================================= */
@@ -3805,7 +3810,9 @@ app.get(
 app.get(
   "/gold-data",
   async (req, res) => {
+
     try {
+
       const candles =
         await getCandles(
           TF["5M"],
@@ -3816,6 +3823,7 @@ app.get(
         last(candles);
 
       res.json({
+
         success: true,
 
         instrument:
@@ -3828,17 +3836,22 @@ app.get(
         candle:
           current
       });
+
     } catch (
       error
     ) {
+
       res.status(500).json({
+
         success: false,
+
         error:
           error.message
       });
     }
   }
 );
+
 
 /* =========================================================
    TECHNICAL ANALYSIS
@@ -3847,7 +3860,9 @@ app.get(
 app.get(
   "/technical-analysis",
   async (req, res) => {
+
     try {
+
       const candles =
         await getCandles(
           TF["5M"],
@@ -3861,6 +3876,7 @@ app.get(
         );
 
       res.json({
+
         success: true,
 
         instrument:
@@ -3868,17 +3884,22 @@ app.get(
 
         analysis
       });
+
     } catch (
       error
     ) {
+
       res.status(500).json({
+
         success: false,
+
         error:
           error.message
       });
     }
   }
 );
+
 
 /* =========================================================
    MTF ANALYSIS
@@ -3887,24 +3908,31 @@ app.get(
 app.get(
   "/mtf-analysis",
   async (req, res) => {
+
     try {
+
       const result =
         await mtfAnalysis();
 
       res.json(
         result
       );
+
     } catch (
       error
     ) {
+
       res.status(500).json({
+
         success: false,
+
         error:
           error.message
       });
     }
   }
 );
+
 
 /* =========================================================
    FULL ANALYSIS + CONFIRMED TELEGRAM
@@ -3913,14 +3941,14 @@ app.get(
 app.get(
   "/analyze",
   async (req, res) => {
+
     try {
+
       const mtf =
         await mtfAnalysis();
 
       const ai =
-        await aiAnalysis(
-          mtf
-        );
+        await aiAnalysis(mtf);
 
       let telegram =
         null;
@@ -3934,16 +3962,17 @@ app.get(
           ?.status ===
           "SELL CONFIRMED"
       ) {
+
         telegram =
           await sendTelegramMessage(
             buildTelegramMessage(
-              mtf,
-              ai
+              mtf
             )
           );
       }
 
       res.json({
+
         ...mtf,
 
         AI_ANALYSIS:
@@ -3952,17 +3981,22 @@ app.get(
         TELEGRAM:
           telegram
       });
+
     } catch (
       error
     ) {
+
       res.status(500).json({
+
         success: false,
+
         error:
           error.message
       });
     }
   }
 );
+
 
 /* =========================================================
    GEMINI TEST
@@ -3971,9 +4005,12 @@ app.get(
 app.get(
   "/gemini-test",
   async (req, res) => {
+
     try {
+
       const result =
         await geminiAnalysis({
+
           instrument:
             OUTPUT_SYMBOL,
 
@@ -3982,21 +4019,27 @@ app.get(
         });
 
       res.json({
+
         success: true,
 
         result
       });
+
     } catch (
       error
     ) {
+
       res.status(500).json({
+
         success: false,
+
         error:
           error.message
       });
     }
   }
 );
+
 
 /* =========================================================
    TELEGRAM TEST
@@ -4005,32 +4048,44 @@ app.get(
 app.get(
   "/telegram-test",
   async (req, res) => {
+
     try {
+
       const result =
         await sendTelegramMessage(
+
           "XAU AI BOT\n\n" +
+
           "Telegram connection successful.\n\n" +
+
           "Chat ID: " +
+
           TELEGRAM_CHAT_ID
         );
 
       res.json({
+
         success: true,
 
         telegram:
           result
       });
+
     } catch (
       error
     ) {
+
       res.status(500).json({
+
         success: false,
+
         error:
           error.message
       });
     }
   }
 );
+
 
 /* =========================================================
    SERVER
@@ -4040,6 +4095,7 @@ app.listen(
   PORT,
   "0.0.0.0",
   () => {
+
     console.log(
       `XAU AI Strong Engine running on port ${PORT}`
     );
