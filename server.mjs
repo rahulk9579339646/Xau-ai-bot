@@ -2,6 +2,27 @@ import express from "express";
 
 const app = express();
 app.use(express.json());
+/* =========================================================
+   CORS FOR FXBLUE CONDITIONS PANEL
+========================================================= */
+
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
 
 const PORT = process.env.PORT || 10000;
 
@@ -3970,7 +3991,198 @@ app.get(
 );/* =========================================================
    SERVER
 ========================================================= */
+/* =========================================================
+   FXBLUE CONDITIONS PANEL
+   READ-ONLY - DOES NOT PLACE TRADES
+========================================================= */
 
+app.get("/conditions", async (req, res) => {
+  try {
+    const mtf = await mtfAnalysis();
+
+    const a1 = mtf.analysis?.["1H"] || {};
+    const a15 = mtf.analysis?.["15M"] || {};
+    const a5 = mtf.analysis?.["5M"] || {};
+
+    const buyCandle =
+      a5.candle?.direction === "Bullish" &&
+      (
+        a5.candle?.strength === "Strong" ||
+        a5.candle?.patterns?.includes("Bullish Engulfing") ||
+        a5.candle?.patterns?.includes("Bullish Rejection")
+      );
+
+    const sellCandle =
+      a5.candle?.direction === "Bearish" &&
+      (
+        a5.candle?.strength === "Strong" ||
+        a5.candle?.patterns?.includes("Bearish Engulfing") ||
+        a5.candle?.patterns?.includes("Bearish Rejection")
+      );
+
+    const conditions = {
+      buy: {
+        htfStructure:
+          a1.structure?.structure === "Bullish Structure",
+
+        m15Structure:
+          a15.structure?.structure === "Bullish Structure",
+
+        m15StructureConfirmation:
+          a15.breakDirection === "Bullish" ||
+          a15.CHoCH === "Bullish CHoCH" ||
+          a15.MSS === "Bullish MSS",
+
+        m5StructureBreak:
+          a5.breakDirection === "Bullish",
+
+        rsi:
+          Number(a5.indicators?.RSI14) > 50,
+
+        macd:
+          a5.indicators?.MACD?.bias === "Bullish",
+
+        liquiditySweep:
+          a5.liquidity?.latestSweep ===
+          "Bullish Liquidity Sweep",
+
+        candleConfirmation:
+          buyCandle
+      },
+
+      sell: {
+        htfStructure:
+          a1.structure?.structure === "Bearish Structure",
+
+        m15Structure:
+          a15.structure?.structure === "Bearish Structure",
+
+        m15StructureConfirmation:
+          a15.breakDirection === "Bearish" ||
+          a15.CHoCH === "Bearish CHoCH" ||
+          a15.MSS === "Bearish MSS",
+
+        m5StructureBreak:
+          a5.breakDirection === "Bearish",
+
+        rsi:
+          Number(a5.indicators?.RSI14) < 50,
+
+        macd:
+          a5.indicators?.MACD?.bias === "Bearish",
+
+        liquiditySweep:
+          a5.liquidity?.latestSweep ===
+          "Bearish Liquidity Sweep",
+
+        candleConfirmation:
+          sellCandle
+      }
+    };
+
+    res.json({
+      success: true,
+      instrument: "XAUUSD",
+
+      generatedAt:
+        mtf.generatedAt,
+
+      currentPrice:
+        mtf.ENTRY_CONFIRMATION?.currentPrice ?? null,
+
+      status:
+        mtf.ENTRY_CONFIRMATION?.status ?? "Waiting",
+
+      direction:
+        mtf.ENTRY_CONFIRMATION?.direction ?? "None",
+
+      scores: {
+        buy:
+          mtf.ENTRY_CONFIRMATION?.bullishScore ?? 0,
+
+        sell:
+          mtf.ENTRY_CONFIRMATION?.bearishScore ?? 0,
+
+        maximum: 13,
+
+        minimumRequired: 7
+      },
+
+      mtf: {
+        "1H":
+          mtf.MTF?.["1H"] ?? null,
+
+        "15M":
+          mtf.MTF?.["15M"] ?? null,
+
+        "5M":
+          mtf.MTF?.["5M"] ?? null,
+
+        alignment:
+          mtf.MTF?.alignment ?? null
+      },
+
+      structure: {
+        "1H_BOS":
+          mtf.MTF_CONFIRMATION?.HTF_BOS ?? null,
+
+        "5M_BOS":
+          mtf.MTF_CONFIRMATION?.LTF_BOS ?? null,
+
+        "1H_CHoCH":
+          mtf.MTF_CONFIRMATION?.["1H_CHoCH"] ?? null,
+
+        "15M_CHoCH":
+          mtf.MTF_CONFIRMATION?.["15M_CHoCH"] ?? null,
+
+        "5M_CHoCH":
+          mtf.MTF_CONFIRMATION?.["5M_CHoCH"] ?? null,
+
+        "1H_MSS":
+          mtf.MTF_CONFIRMATION?.["1H_MSS"] ?? null,
+
+        "15M_MSS":
+          mtf.MTF_CONFIRMATION?.["15M_MSS"] ?? null,
+
+        "5M_MSS":
+          mtf.MTF_CONFIRMATION?.["5M_MSS"] ?? null
+      },
+
+      details: {
+        RSI14:
+          a5.indicators?.RSI14 ?? null,
+
+        MACD:
+          a5.indicators?.MACD?.bias ?? "Unknown",
+
+        liquiditySweep:
+          a5.liquidity?.latestSweep ?? "None",
+
+        candleDirection:
+          a5.candle?.direction ?? "Neutral",
+
+        candleStrength:
+          a5.candle?.strength ?? "Unknown",
+
+        candlePatterns:
+          a5.candle?.patterns ?? [],
+
+        displacement:
+          a5.candle?.displacement ?? null
+      },
+
+      conditions
+    });
+
+  } catch (error) {
+
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+
+  }
+});
 app.listen(
   PORT,
   "0.0.0.0",
