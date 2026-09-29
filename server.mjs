@@ -2,27 +2,6 @@ import express from "express";
 
 const app = express();
 app.use(express.json());
-/* =========================================================
-   CORS FOR FXBLUE CONDITIONS PANEL
-========================================================= */
-
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,OPTIONS"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization"
-  );
-
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-
-  next();
-});
 
 const PORT = process.env.PORT || 10000;
 
@@ -121,6 +100,89 @@ function normalizeCandles(values) {
     );
 }
 
+function normalizeBiquoteCandles(bars) {
+  return bars
+    .filter(x => !x.isOpen)
+    .map(x => ({
+      time: x.openTime,
+      open: num(x.open),
+      high: num(x.high),
+      low: num(x.low),
+      close: num(x.close),
+      volume: num(x.volume ?? x.tickVolume)
+    }))
+    .filter(
+      x =>
+        x.time &&
+        [x.open, x.high, x.low, x.close].every(Number.isFinite)
+    )
+    .sort(
+      (a, b) =>
+        new Date(a.time) -
+        new Date(b.time)
+    );
+}
+
+function biquoteInterval(interval) {
+  const map = {
+    "1min": "1m",
+    "5min": "5m",
+    "15min": "15m",
+    "30min": "30m",
+    "1h": "1h",
+    "4h": "4h",
+    "1d": "1d"
+  };
+
+  return map[interval] || interval;
+}
+
+async function getCandlesFromBiquote(
+  interval,
+  outputsize = 350
+) {
+  const limit = Math.min(
+    Math.max(outputsize, 100),
+    1000
+  );
+
+  const url =
+    `https://biquote.io/api/XAUUSD/ohlc` +
+    `?interval=${encodeURIComponent(
+      biquoteInterval(interval)
+    )}` +
+    `&limit=${limit}`;
+
+  const response =
+    await fetch(url);
+
+  const json =
+    await response.json();
+
+  if (
+    !response.ok ||
+    !Array.isArray(json.bars)
+  ) {
+    throw new Error(
+      json.message ||
+      `Biquote ${interval} candles unavailable`
+    );
+  }
+
+  const candles =
+    normalizeBiquoteCandles(
+      json.bars
+    );
+
+  if (candles.length < 60) {
+    throw new Error(
+      `Biquote returned insufficient ${interval} closed candles`
+    );
+  }
+
+  return candles;
+}
+
 async function getCandles(
   interval,
   outputsize = 350
@@ -139,49 +201,81 @@ async function getCandles(
     return cached.data;
   }
 
-  if (!TWELVE_DATA_API_KEY) {
-    throw new Error(
+  let twelveError = null;
+
+  if (TWELVE_DATA_API_KEY) {
+    try {
+      const url =
+        `https://api.twelvedata.com/time_series` +
+        `?symbol=${encodeURIComponent(SYMBOL)}` +
+        `&interval=${encodeURIComponent(interval)}` +
+        `&outputsize=${outputsize}` +
+        `&apikey=${encodeURIComponent(
+          TWELVE_DATA_API_KEY
+        )}`;
+
+      const response =
+        await fetch(url);
+
+      const json =
+        await response.json();
+
+      if (
+        !response.ok ||
+        json.status === "error" ||
+        !json.values
+      ) {
+        throw new Error(
+          json.message ||
+          "Unable to retrieve Twelve Data candles"
+        );
+      }
+
+      const candles =
+        normalizeCandles(
+          json.values
+        );
+
+      CACHE.set(cacheKey, {
+        time: Date.now(),
+        data: candles
+      });
+
+      return candles;
+    } catch (error) {
+      twelveError = error;
+    }
+  } else {
+    twelveError = new Error(
       "TWELVE_DATA_API_KEY is missing"
     );
   }
 
-  const url =
-    `https://api.twelvedata.com/time_series` +
-    `?symbol=${encodeURIComponent(SYMBOL)}` +
-    `&interval=${encodeURIComponent(interval)}` +
-    `&outputsize=${outputsize}` +
-    `&apikey=${encodeURIComponent(
-      TWELVE_DATA_API_KEY
-    )}`;
+  try {
+    const candles =
+      await getCandlesFromBiquote(
+        interval,
+        outputsize
+      );
 
-  const response =
-    await fetch(url);
+    CACHE.set(cacheKey, {
+      time: Date.now(),
+      data: candles
+    });
 
-  const json =
-    await response.json();
-
-  if (
-    !response.ok ||
-    json.status === "error" ||
-    !json.values
-  ) {
+    return candles;
+  } catch (biquoteError) {
     throw new Error(
-      json.message ||
-      "Unable to retrieve Twelve Data candles"
+      `Twelve Data failed: ${
+        twelveError?.message ||
+        "unknown error"
+      }; ` +
+      `Biquote failed: ${
+        biquoteError?.message ||
+        "unknown error"
+      }`
     );
   }
-
-  const candles =
-    normalizeCandles(
-      json.values
-    );
-
-  CACHE.set(cacheKey, {
-    time: Date.now(),
-    data: candles
-  });
-
-  return candles;
 }
 
 /* =========================================================
@@ -1020,7 +1114,8 @@ function candleAnalysis(
       "Bullish Rejection"
     );
   }
-    if (
+
+  if (
     upperWick >
       body * 2 &&
     lowerWick <
@@ -1980,12 +2075,7 @@ function analyzeTimeframe(
       candles
     );
 
-  const indicators =
-    indicatorAnalysis(
-      candles
-    );
-
-  const fvg =
+  const FVG =
     findFVG(
       candles
     );
@@ -1995,15 +2085,15 @@ function analyzeTimeframe(
       candles
     );
 
-  const supplyDemand =
-    findSupplyDemand(
-      candles
-    );
-
-  const sr =
+  const supportResistanceData =
     supportResistance(
       candles,
       structure
+    );
+
+  const supplyDemand =
+    findSupplyDemand(
+      candles
     );
 
   const volume =
@@ -2011,10 +2101,15 @@ function analyzeTimeframe(
       candles
     );
 
-  const relevant =
+  const indicators =
+    indicatorAnalysis(
+      candles
+    );
+
+  const zones =
     relevantZones(
       candles,
-      fvg,
+      FVG,
       orderBlocks,
       supplyDemand
     );
@@ -2022,14 +2117,14 @@ function analyzeTimeframe(
   return {
     timeframe,
 
-    currentClosedCandle:
-      current,
+    currentPrice:
+      round(
+        current?.close,
+        5
+      ),
 
-    formingCandle:
-      null,
-
-    candleDataNote:
-      "Only closed candle data is used for confirmation.",
+    trend:
+      indicators.trend,
 
     structure,
 
@@ -2042,120 +2137,166 @@ function analyzeTimeframe(
     MSS:
       breaks.MSS,
 
-    brokenLevel:
-      breaks.brokenLevel,
-
     breakDirection:
       breaks.direction,
 
-    liquidity,
+    brokenLevel:
+      breaks.brokenLevel,
 
     candle,
 
-    displacement:
-      candle?.displacement ||
-      "None",
+    liquidity,
 
-    indicators,
-
-    trend:
-      indicators.trend,
-
-    momentum:
-      indicators.momentum,
-
-    supportResistance:
-      sr,
-
-    FVG:
-      fvg,
+    FVG,
 
     orderBlocks,
 
     supplyDemand,
 
-    relevantZones:
-      relevant,
+    supportResistance:
+      supportResistanceData,
 
-    volume
+    volume,
+
+    indicators,
+
+    zones,
+
+    displacement:
+      candle?.displacement ||
+      "None"
   };
 }
 
 /* =========================================================
-   MTF STRUCTURE
+   MTF RETEST
 ========================================================= */
 
-function mtfStructure(
-  a1,
+function buildRetest(
   a15,
-  a5
+  a5,
+  currentPrice
 ) {
+  const bullishZones = [
+    ...(a5.zones?.bullishFVG || []),
+    ...(a5.zones?.bullishOB || []),
+    ...(a5.zones?.demand || [])
+  ];
+
+  const bearishZones = [
+    ...(a5.zones?.bearishFVG || []),
+    ...(a5.zones?.bearishOB || []),
+    ...(a5.zones?.supply || [])
+  ];
+
   const bullish =
-    [a1, a15, a5]
+    bullishZones
       .filter(
-        x =>
-          x.structure
-            .structure ===
-          "Bullish Structure"
+        z =>
+          Number.isFinite(z.low) &&
+          Number.isFinite(z.high)
       )
-      .length;
+      .sort(
+        (a, b) =>
+          Math.abs(
+            currentPrice -
+              ((a.low + a.high) / 2)
+          ) -
+          Math.abs(
+            currentPrice -
+              ((b.low + b.high) / 2)
+          )
+      )[0] ||
+    null;
 
   const bearish =
-    [a1, a15, a5]
+    bearishZones
       .filter(
-        x =>
-          x.structure
-            .structure ===
-          "Bearish Structure"
+        z =>
+          Number.isFinite(z.low) &&
+          Number.isFinite(z.high)
       )
-      .length;
-
-  let structureBias =
-    "Mixed";
-
-  if (
-    bullish >= 2
-  ) {
-    structureBias =
-      "Bullish";
-  }
-
-  if (
-    bearish >= 2
-  ) {
-    structureBias =
-      "Bearish";
-  }
-
-  const reversal =
-    a15.CHoCH !==
-      "None" ||
-    a15.MSS !==
-      "None" ||
-    a5.CHoCH !==
-      "None" ||
-    a5.MSS !==
-      "None";
+      .sort(
+        (a, b) =>
+          Math.abs(
+            currentPrice -
+              ((a.low + a.high) / 2)
+          ) -
+          Math.abs(
+            currentPrice -
+              ((b.low + b.high) / 2)
+          )
+      )[0] ||
+    null;
 
   return {
-    "1H":
-      a1.structure
-        .structure,
+    bullishRetestZone:
+      bullish
+        ? {
+            low:
+              bullish.low,
+            high:
+              bullish.high
+          }
+        : null,
 
-    "15M":
-      a15.structure
-        .structure,
+    bearishRetestZone:
+      bearish
+        ? {
+            low:
+              bearish.low,
+            high:
+              bearish.high
+          }
+        : null,
 
-    "5M":
-      a5.structure
-        .structure,
+    priceInBullishZone:
+      !!(
+        bullish &&
+        zoneContains(
+          bullish,
+          currentPrice
+        )
+      ),
 
-    structureBias,
+    priceInBearishZone:
+      !!(
+        bearish &&
+        zoneContains(
+          bearish,
+          currentPrice
+        )
+      ),
 
-    reversalState:
-      reversal
-        ? "Potential Reversal Detected"
-        : "No Confirmed Reversal"
+    bullishRetestConfirmed:
+      !!(
+        bullish &&
+        zoneContains(
+          bullish,
+          currentPrice
+        ) &&
+        (
+          a5.breakDirection ===
+          "Bullish" ||
+          a5.candle?.direction ===
+          "Bullish"
+        )
+      ),
+
+    bearishRetestConfirmed:
+      !!(
+        bearish &&
+        zoneContains(
+          bearish,
+          currentPrice
+        ) &&
+        (
+          a5.breakDirection ===
+          "Bearish" ||
+          a5.candle?.direction ===
+          "Bearish"
+        )
+      )
   };
 }
 
@@ -2166,221 +2307,14 @@ function mtfStructure(
 function entryConfirmation(
   a1,
   a15,
-  a5
+  a5,
+  retest
 ) {
   let bullishScore = 0;
   let bearishScore = 0;
 
   const bullishReasons = [];
   const bearishReasons = [];
-
-  if (
-    a1.structure
-      .structure ===
-    "Bullish Structure"
-  ) {
-    bullishScore += 2;
-
-    bullishReasons.push(
-      "1H bullish structure"
-    );
-  }
-
-  if (
-    a1.structure
-      .structure ===
-    "Bearish Structure"
-  ) {
-    bearishScore += 2;
-
-    bearishReasons.push(
-      "1H bearish structure"
-    );
-  }
-
-  if (
-    a15.structure
-      .structure ===
-    "Bullish Structure"
-  ) {
-    bullishScore++;
-
-    bullishReasons.push(
-      "15M bullish structure"
-    );
-  }
-
-  if (
-    a15.structure
-      .structure ===
-    "Bearish Structure"
-  ) {
-    bearishScore++;
-
-    bearishReasons.push(
-      "15M bearish structure"
-    );
-  }
-
-  if (
-    a15.breakDirection ===
-      "Bullish" ||
-    a15.CHoCH ===
-      "Bullish CHoCH" ||
-    a15.MSS ===
-      "Bullish MSS"
-  ) {
-    bullishScore += 2;
-
-    bullishReasons.push(
-      "15M bullish structure confirmation"
-    );
-  }
-
-  if (
-    a15.breakDirection ===
-      "Bearish" ||
-    a15.CHoCH ===
-      "Bearish CHoCH" ||
-    a15.MSS ===
-      "Bearish MSS"
-  ) {
-    bearishScore += 2;
-
-    bearishReasons.push(
-      "15M bearish structure confirmation"
-    );
-  }
-
-  if (
-    a5.breakDirection ===
-    "Bullish"
-  ) {
-    bullishScore += 3;
-
-    bullishReasons.push(
-      "5M bullish BOS/CHoCH/MSS"
-    );
-  }
-
-  if (
-    a5.breakDirection ===
-    "Bearish"
-  ) {
-    bearishScore += 3;
-
-    bearishReasons.push(
-      "5M bearish BOS/CHoCH/MSS"
-    );
-  }
-
-  if (
-    a5.indicators.RSI14 >
-    50
-  ) {
-    bullishScore++;
-
-    bullishReasons.push(
-      "5M RSI above 50"
-    );
-  }
-
-  if (
-    a5.indicators.RSI14 <
-    50
-  ) {
-    bearishScore++;
-
-    bearishReasons.push(
-      "5M RSI below 50"
-    );
-  }
-
-  if (
-    a5.indicators.MACD?.bias ===
-    "Bullish"
-  ) {
-    bullishScore++;
-
-    bullishReasons.push(
-      "5M MACD bullish"
-    );
-  }
-
-  if (
-    a5.indicators.MACD?.bias ===
-    "Bearish"
-  ) {
-    bearishScore++;
-
-    bearishReasons.push(
-      "5M MACD bearish"
-    );
-  }
-
-  if (
-    a5.liquidity.latestSweep ===
-    "Bullish Liquidity Sweep"
-  ) {
-    bullishScore += 2;
-
-    bullishReasons.push(
-      "5M bullish liquidity sweep"
-    );
-  }
-
-  if (
-    a5.liquidity.latestSweep ===
-    "Bearish Liquidity Sweep"
-  ) {
-    bearishScore += 2;
-
-    bearishReasons.push(
-      "5M bearish liquidity sweep"
-    );
-  }
-
-  if (
-    a5.candle?.direction ===
-      "Bullish" &&
-    (
-      a5.candle.strength ===
-        "Strong" ||
-      a5.candle.patterns.includes(
-        "Bullish Engulfing"
-      ) ||
-      a5.candle.patterns.includes(
-        "Bullish Rejection"
-      )
-    )
-  ) {
-    bullishScore++;
-
-    bullishReasons.push(
-      "5M bullish candle confirmation"
-    );
-  }
-
-  if (
-    a5.candle?.direction ===
-      "Bearish" &&
-    (
-      a5.candle.strength ===
-        "Strong" ||
-      a5.candle.patterns.includes(
-        "Bearish Engulfing"
-      ) ||
-      a5.candle.patterns.includes(
-        "Bearish Rejection"
-      )
-    )
-  ) {
-    bearishScore++;
-
-    bearishReasons.push(
-      "5M bearish candle confirmation"
-    );
-  }
 
   const bullishStructureBreak =
     a5.breakDirection ===
@@ -2391,15 +2325,13 @@ function entryConfirmation(
     "Bearish";
 
   const bullishTechnical =
-    a5.indicators.RSI14 >
-      50 &&
-    a5.indicators.MACD?.bias ===
+    a5.indicators?.RSI14 > 50 &&
+    a5.indicators?.MACD?.bias ===
       "Bullish";
 
   const bearishTechnical =
-    a5.indicators.RSI14 <
-      50 &&
-    a5.indicators.MACD?.bias ===
+    a5.indicators?.RSI14 < 50 &&
+    a5.indicators?.MACD?.bias ===
       "Bearish";
 
   const bullishHTF =
@@ -2410,264 +2342,250 @@ function entryConfirmation(
     a1.structure.structure !==
     "Bullish Structure";
 
-  let status =
-    "Waiting";
-
-  let direction =
-    "None";
-
-  const entryReason = [];
+  if (
+    a1.structure.structure ===
+    "Bullish Structure"
+  ) {
+    bullishScore += 2;
+    bullishReasons.push(
+      "1H bullish structure"
+    );
+  }
 
   if (
+    a15.structure.structure ===
+    "Bullish Structure"
+  ) {
+    bullishScore += 1;
+    bullishReasons.push(
+      "15M bullish structure"
+    );
+  }
+
+  if (
+    a15.breakDirection ===
+    "Bullish"
+  ) {
+    bullishScore += 2;
+    bullishReasons.push(
+      "15M bullish structure confirmation"
+    );
+  }
+
+  if (
+    bullishStructureBreak
+  ) {
+    bullishScore += 3;
+    bullishReasons.push(
+      "5M bullish break"
+    );
+  }
+
+  if (
+    a5.indicators?.RSI14 >
+    50
+  ) {
+    bullishScore += 1;
+    bullishReasons.push(
+      "RSI above 50"
+    );
+  }
+
+  if (
+    a5.indicators?.MACD?.bias ===
+    "Bullish"
+  ) {
+    bullishScore += 1;
+    bullishReasons.push(
+      "MACD bullish"
+    );
+  }
+
+  if (
+    a5.liquidity?.latestSweep ===
+    "Bullish Liquidity Sweep"
+  ) {
+    bullishScore += 2;
+    bullishReasons.push(
+      "Bullish liquidity sweep"
+    );
+  }
+
+  if (
+    a5.candle?.direction ===
+      "Bullish" &&
+    (
+      a5.candle?.strength ===
+        "Strong" ||
+      a5.candle?.patterns?.includes(
+        "Bullish Engulfing"
+      ) ||
+      a5.candle?.patterns?.includes(
+        "Bullish Rejection"
+      )
+    )
+  ) {
+    bullishScore += 1;
+    bullishReasons.push(
+      "Bullish candle confirmation"
+    );
+  }
+
+  if (
+    a1.structure.structure ===
+    "Bearish Structure"
+  ) {
+    bearishScore += 2;
+    bearishReasons.push(
+      "1H bearish structure"
+    );
+  }
+
+  if (
+    a15.structure.structure ===
+    "Bearish Structure"
+  ) {
+    bearishScore += 1;
+    bearishReasons.push(
+      "15M bearish structure"
+    );
+  }
+
+  if (
+    a15.breakDirection ===
+    "Bearish"
+  ) {
+    bearishScore += 2;
+    bearishReasons.push(
+      "15M bearish structure confirmation"
+    );
+  }
+
+  if (
+    bearishStructureBreak
+  ) {
+    bearishScore += 3;
+    bearishReasons.push(
+      "5M bearish break"
+    );
+  }
+
+  if (
+    a5.indicators?.RSI14 <
+    50
+  ) {
+    bearishScore += 1;
+    bearishReasons.push(
+      "RSI below 50"
+    );
+  }
+
+  if (
+    a5.indicators?.MACD?.bias ===
+    "Bearish"
+  ) {
+    bearishScore += 1;
+    bearishReasons.push(
+      "MACD bearish"
+    );
+  }
+
+  if (
+    a5.liquidity?.latestSweep ===
+    "Bearish Liquidity Sweep"
+  ) {
+    bearishScore += 2;
+    bearishReasons.push(
+      "Bearish liquidity sweep"
+    );
+  }
+
+  if (
+    a5.candle?.direction ===
+      "Bearish" &&
+    (
+      a5.candle?.strength ===
+        "Strong" ||
+      a5.candle?.patterns?.includes(
+        "Bearish Engulfing"
+      ) ||
+      a5.candle?.patterns?.includes(
+        "Bearish Rejection"
+      )
+    )
+  ) {
+    bearishScore += 1;
+    bearishReasons.push(
+      "Bearish candle confirmation"
+    );
+  }
+
+  const bullishConfirmed =
     bullishStructureBreak &&
     bullishTechnical &&
     bullishHTF &&
     bullishScore >= 7 &&
     bullishScore >
-      bearishScore + 2
+      bearishScore + 2;
+
+  const bearishConfirmed =
+    bearishStructureBreak &&
+    bearishTechnical &&
+    bearishHTF &&
+    bearishScore >= 7 &&
+    bearishScore >
+      bullishScore + 2;
+
+  let status =
+    "WAITING";
+
+  let direction =
+    "None";
+
+  if (
+    bullishConfirmed
   ) {
     status =
       "BUY CONFIRMED";
 
     direction =
       "BUY";
-
-    entryReason.push(
-      "5M bullish structure break confirmed"
-    );
-
-    entryReason.push(
-      "5M technical confirmation aligned"
-    );
-
-    entryReason.push(
-      "MTF bias supports bullish continuation/reversal"
-    );
-  }
-
-  if (
-    bearishStructureBreak &&
-    bearishTechnical &&
-    bearishHTF &&
-    bearishScore >= 7 &&
-    bearishScore >
-      bullishScore + 2
+  } else if (
+    bearishConfirmed
   ) {
     status =
       "SELL CONFIRMED";
 
     direction =
       "SELL";
-
-    entryReason.push(
-      "5M bearish structure break confirmed"
-    );
-
-    entryReason.push(
-      "5M technical confirmation aligned"
-    );
-
-    entryReason.push(
-      "MTF bias supports bearish continuation/reversal"
-    );
-  }
-
-  if (
-    Math.abs(
-      bullishScore -
-      bearishScore
-    ) <= 2
-  ) {
-    status =
-      "Waiting";
-
-    direction =
-      "None";
   }
 
   return {
     status,
+
     direction,
 
     bullishScore,
+
     bearishScore,
 
-    bullishReasons:
-      [
-        ...new Set(
-          bullishReasons
-        )
-      ],
+    bullishReasons,
 
-    bearishReasons:
-      [
-        ...new Set(
-          bearishReasons
-        )
-      ],
+    bearishReasons,
 
-    entryReason,
+    bullishTechnical,
 
-    confirmationRules: {
-      HTFAlignmentRequired:
-        true,
+    bearishTechnical,
 
-      LTFStructureBreakRequired:
-        true,
+    bullishHTF,
 
-      TechnicalConfirmationRequired:
-        true,
+    bearishHTF,
 
-      RetestPreferred:
-        true,
+    bullishStructureBreak,
 
-      LiquiditySweepPreferred:
-        true,
+    bearishStructureBreak,
 
-      DisplacementPreferred:
-        true,
-
-      CandleConfirmationPreferred:
-        true
-    }
-  };
-}
-
-/* =========================================================
-   RETEST
-========================================================= */
-
-function nearestZone(
-  zones,
-  price
-) {
-  if (
-    !zones.length
-  ) {
-    return null;
-  }
-
-  return zones
-    .map(
-      z => ({
-        ...z,
-
-        distance:
-          Math.min(
-            Math.abs(
-              price -
-                z.low
-            ),
-
-            Math.abs(
-              price -
-                z.high
-            )
-          )
-      })
-    )
-    .sort(
-      (a, b) =>
-        a.distance -
-        b.distance
-    )[0];
-}
-
-function retestAnalysis(
-  a5
-) {
-  const price =
-    a5.currentClosedCandle
-      .close;
-
-  const bullishZones = [
-    ...(a5.relevantZones
-      .bullishFVG || []),
-
-    ...(a5.relevantZones
-      .bullishOB || []),
-
-    ...(a5.relevantZones
-      .demand || [])
-  ];
-
-  const bearishZones = [
-    ...(a5.relevantZones
-      .bearishFVG || []),
-
-    ...(a5.relevantZones
-      .bearishOB || []),
-
-    ...(a5.relevantZones
-      .supply || [])
-  ];
-
-  const bull =
-    nearestZone(
-      bullishZones,
-      price
-    );
-
-  const bear =
-    nearestZone(
-      bearishZones,
-      price
-    );
-
-  return {
-    bullishRetestZone:
-      bull
-        ? {
-            low:
-              bull.low,
-
-            high:
-              bull.high,
-
-            distance:
-              round(
-                bull.distance,
-                5
-              ),
-
-            type:
-              "Bullish zone"
-          }
-        : null,
-
-    bearishRetestZone:
-      bear
-        ? {
-            low:
-              bear.low,
-
-            high:
-              bear.high,
-
-            distance:
-              round(
-                bear.distance,
-                5
-              ),
-
-            type:
-              "Bearish zone"
-          }
-        : null,
-
-    priceInBullishZone:
-      !!bull &&
-      zoneContains(
-        bull,
-        price
-      ),
-
-    priceInBearishZone:
-      !!bear &&
-      zoneContains(
-        bear,
-        price
-      )
+    retest
   };
 }
 
@@ -2675,72 +2593,74 @@ function retestAnalysis(
    TRADE LEVELS
 ========================================================= */
 
-function tradeLevels(
-  a5,
-  confirmation
+function buildTradeLevels(
+  direction,
+  currentPrice,
+  a5
 ) {
   if (
-    confirmation.status !==
-      "BUY CONFIRMED" &&
-    confirmation.status !==
-      "SELL CONFIRMED"
+    direction !== "BUY" &&
+    direction !== "SELL"
   ) {
     return null;
   }
 
-  const price =
-    a5.currentClosedCandle
-      .close;
-
   const atrValue =
-    a5.indicators.ATR14 ||
-    5;
-
-  const sr =
-    a5.supportResistance;
-
-  const direction =
-    confirmation.direction;
-
-  let stop;
+    a5.indicators?.ATR14;
 
   if (
-    direction ===
-    "BUY"
+    !Number.isFinite(
+      atrValue
+    ) ||
+    atrValue <= 0
   ) {
-    const structuralStop =
-      sr.support
-        ? sr.support -
-          atrValue * 0.15
-        : price -
-          atrValue * 1.2;
+    return null;
+  }
 
-    stop =
-      Math.min(
-        structuralStop,
-        price -
-          atrValue * 0.8
-      );
+  const recentLow =
+    a5.structure
+      ?.latestSwingLow
+      ?.price;
+
+  const recentHigh =
+    a5.structure
+      ?.latestSwingHigh
+      ?.price;
+
+  let stopLoss;
+
+  if (
+    direction === "BUY"
+  ) {
+    stopLoss =
+      Number.isFinite(
+        recentLow
+      )
+        ? Math.min(
+            recentLow,
+            currentPrice -
+              atrValue
+          )
+        : currentPrice -
+          atrValue;
   } else {
-    const structuralStop =
-      sr.resistance
-        ? sr.resistance +
-          atrValue * 0.15
-        : price +
-          atrValue * 1.2;
-
-    stop =
-      Math.max(
-        structuralStop,
-        price +
-          atrValue * 0.8
-      );
+    stopLoss =
+      Number.isFinite(
+        recentHigh
+      )
+        ? Math.max(
+            recentHigh,
+            currentPrice +
+              atrValue
+          )
+        : currentPrice +
+          atrValue;
   }
 
   const risk =
     Math.abs(
-      price -
-      stop
+      currentPrice -
+      stopLoss
     );
 
   if (
@@ -2752,26 +2672,25 @@ function tradeLevels(
     return null;
   }
 
-  const tp1 =
-    direction ===
-      "BUY"
-      ? price + risk
-      : price - risk;
+  const TP1 =
+    direction === "BUY"
+      ? currentPrice +
+        risk
+      : currentPrice -
+        risk;
 
-  const tp2 =
-    direction ===
-      "BUY"
-      ? price +
+  const TP2 =
+    direction === "BUY"
+      ? currentPrice +
         risk * 1.5
-      : price -
+      : currentPrice -
         risk * 1.5;
 
-  const tp3 =
-    direction ===
-      "BUY"
-      ? price +
+  const TP3 =
+    direction === "BUY"
+      ? currentPrice +
         risk * 2
-      : price -
+      : currentPrice -
         risk * 2;
 
   return {
@@ -2779,13 +2698,13 @@ function tradeLevels(
 
     entry:
       round(
-        price,
+        currentPrice,
         5
       ),
 
     stopLoss:
       round(
-        stop,
+        stopLoss,
         5
       ),
 
@@ -2798,31 +2717,22 @@ function tradeLevels(
     takeProfit: {
       TP1_1R:
         round(
-          tp1,
+          TP1,
           5
         ),
 
       TP2_1_5R:
         round(
-          tp2,
+          TP2,
           5
         ),
 
       TP3_2R:
         round(
-          tp3,
+          TP3,
           5
         )
-    },
-
-    riskReward: {
-      TP1: "1:1",
-      TP2: "1:1.5",
-      TP3: "1:2"
-    },
-
-    note:
-      "Analytical levels only. Not guaranteed execution prices."
+    }
   };
 }
 
@@ -2838,48 +2748,42 @@ function invalidation(
   return {
     BUY: {
       primary:
-        a5.supportResistance
-          .support,
-
-      structural:
         a5.structure
-          .latestSwingLow
-          ?.price ||
+          ?.latestSwingLow
+          ?.price ??
         null,
 
-      condition:
-        "Bullish thesis weakens if 5M closes below relevant structural support."
+      secondary:
+        a15.structure
+          ?.latestSwingLow
+          ?.price ??
+        null,
+
+      reason:
+        "BUY invalidation if confirmed bullish structure fails below the latest protected swing low."
     },
 
     SELL: {
       primary:
-        a5.supportResistance
-          .resistance,
-
-      structural:
         a5.structure
-          .latestSwingHigh
-          ?.price ||
+          ?.latestSwingHigh
+          ?.price ??
         null,
 
-      condition:
-        "Bearish thesis weakens if 5M closes above relevant structural resistance."
-    },
-
-    HTFWarning: {
-      "1H":
-        a1.structure
-          .structure,
-
-      "15M":
+      secondary:
         a15.structure
-          .structure
+          ?.latestSwingHigh
+          ?.price ??
+        null,
+
+      reason:
+        "SELL invalidation if confirmed bearish structure fails above the latest protected swing high."
     }
   };
 }
 
 /* =========================================================
-   MASTER MTF ENGINE
+   MTF ANALYSIS
 ========================================================= */
 
 async function mtfAnalysis() {
@@ -2890,15 +2794,18 @@ async function mtfAnalysis() {
   ] =
     await Promise.all([
       getCandles(
-        TF["1H"]
+        TF["1H"],
+        350
       ),
 
       getCandles(
-        TF["15M"]
+        TF["15M"],
+        350
       ),
 
       getCandles(
-        TF["5M"]
+        TF["5M"],
+        350
       )
     ]);
 
@@ -2920,42 +2827,96 @@ async function mtfAnalysis() {
       "5M"
     );
 
+  const currentPrice =
+    a5.currentPrice;
+
+  const retest =
+    buildRetest(
+      a15,
+      a5,
+      currentPrice
+    );
+
   const confirmation =
     entryConfirmation(
       a1,
       a15,
-      a5
-    );
-
-  const retest =
-    retestAnalysis(
-      a5
+      a5,
+      retest
     );
 
   const levels =
-    tradeLevels(
-      a5,
-      confirmation
-    );
-
-  const structure =
-    mtfStructure(
-      a1,
-      a15,
+    buildTradeLevels(
+      confirmation.direction,
+      currentPrice,
       a5
     );
 
-  const alignment =
-    a1.trend ===
-      a15.trend &&
-    a15.trend ===
-      a5.trend
-      ? "Full MTF Alignment"
-      : "Mixed MTF Alignment";
+  let alignment =
+    "Mixed MTF Alignment";
 
-  const currentPrice =
-    a5.currentClosedCandle
-      .close;
+  if (
+    a1.trend.includes(
+      "Bullish"
+    ) &&
+    a15.trend.includes(
+      "Bullish"
+    ) &&
+    a5.trend.includes(
+      "Bullish"
+    )
+  ) {
+    alignment =
+      "Full MTF Bullish Alignment";
+  } else if (
+    a1.trend.includes(
+      "Bearish"
+    ) &&
+    a15.trend.includes(
+      "Bearish"
+    ) &&
+    a5.trend.includes(
+      "Bearish"
+    )
+  ) {
+    alignment =
+      "Full MTF Bearish Alignment";
+  }
+
+  const structureBias =
+    a1.structure.structure ===
+      "Bullish Structure" &&
+    a15.structure.structure !==
+      "Bearish Structure"
+      ? "Bullish"
+      : a1.structure.structure ===
+          "Bearish Structure" &&
+        a15.structure.structure !==
+          "Bullish Structure"
+        ? "Bearish"
+        : "Mixed";
+
+  const reversalState =
+    a1.CHoCH !== "None" ||
+    a15.CHoCH !== "None" ||
+    a5.CHoCH !== "None"
+      ? "Potential Reversal"
+      : "No Confirmed Reversal";
+
+  const structure = {
+    "1H":
+      a1.structure.structure,
+
+    "15M":
+      a15.structure.structure,
+
+    "5M":
+      a5.structure.structure,
+
+    structureBias,
+
+    reversalState
+  };
 
   return {
     success: true,
@@ -3017,7 +2978,8 @@ async function mtfAnalysis() {
           5
         )
     },
-        RETEST:
+
+    RETEST:
       retest,
 
     TRADE_LEVELS:
@@ -3061,7 +3023,6 @@ async function mtfAnalysis() {
     }
   };
 }
-
 /* =========================================================
    GEMINI AI
 ========================================================= */
@@ -3719,7 +3680,6 @@ setInterval(
   sendHourlyTelegramStatus,
   60 * 60 * 1000
 );
-
 /* =========================================================
    ROOT
 ========================================================= */
@@ -3988,201 +3948,12 @@ app.get(
       });
     }
   }
-);/* =========================================================
+);
+
+/* =========================================================
    SERVER
 ========================================================= */
-/* =========================================================
-   FXBLUE CONDITIONS PANEL
-   READ-ONLY - DOES NOT PLACE TRADES
-========================================================= */
 
-app.get("/conditions", async (req, res) => {
-  try {
-    const mtf = await mtfAnalysis();
-
-    const a1 = mtf.analysis?.["1H"] || {};
-    const a15 = mtf.analysis?.["15M"] || {};
-    const a5 = mtf.analysis?.["5M"] || {};
-
-    const buyCandle =
-      a5.candle?.direction === "Bullish" &&
-      (
-        a5.candle?.strength === "Strong" ||
-        a5.candle?.patterns?.includes("Bullish Engulfing") ||
-        a5.candle?.patterns?.includes("Bullish Rejection")
-      );
-
-    const sellCandle =
-      a5.candle?.direction === "Bearish" &&
-      (
-        a5.candle?.strength === "Strong" ||
-        a5.candle?.patterns?.includes("Bearish Engulfing") ||
-        a5.candle?.patterns?.includes("Bearish Rejection")
-      );
-
-    const conditions = {
-      buy: {
-        htfStructure:
-          a1.structure?.structure === "Bullish Structure",
-
-        m15Structure:
-          a15.structure?.structure === "Bullish Structure",
-
-        m15StructureConfirmation:
-          a15.breakDirection === "Bullish" ||
-          a15.CHoCH === "Bullish CHoCH" ||
-          a15.MSS === "Bullish MSS",
-
-        m5StructureBreak:
-          a5.breakDirection === "Bullish",
-
-        rsi:
-          Number(a5.indicators?.RSI14) > 50,
-
-        macd:
-          a5.indicators?.MACD?.bias === "Bullish",
-
-        liquiditySweep:
-          a5.liquidity?.latestSweep ===
-          "Bullish Liquidity Sweep",
-
-        candleConfirmation:
-          buyCandle
-      },
-
-      sell: {
-        htfStructure:
-          a1.structure?.structure === "Bearish Structure",
-
-        m15Structure:
-          a15.structure?.structure === "Bearish Structure",
-
-        m15StructureConfirmation:
-          a15.breakDirection === "Bearish" ||
-          a15.CHoCH === "Bearish CHoCH" ||
-          a15.MSS === "Bearish MSS",
-
-        m5StructureBreak:
-          a5.breakDirection === "Bearish",
-
-        rsi:
-          Number(a5.indicators?.RSI14) < 50,
-
-        macd:
-          a5.indicators?.MACD?.bias === "Bearish",
-
-        liquiditySweep:
-          a5.liquidity?.latestSweep ===
-          "Bearish Liquidity Sweep",
-
-        candleConfirmation:
-          sellCandle
-      }
-    };
-
-    res.json({
-      success: true,
-      instrument: "XAUUSD",
-
-      generatedAt:
-        mtf.generatedAt,
-
-      currentPrice:
-        mtf.ENTRY_CONFIRMATION?.currentPrice ?? null,
-
-      status:
-        mtf.ENTRY_CONFIRMATION?.status ?? "Waiting",
-
-      direction:
-        mtf.ENTRY_CONFIRMATION?.direction ?? "None",
-
-      scores: {
-        buy:
-          mtf.ENTRY_CONFIRMATION?.bullishScore ?? 0,
-
-        sell:
-          mtf.ENTRY_CONFIRMATION?.bearishScore ?? 0,
-
-        maximum: 13,
-
-        minimumRequired: 7
-      },
-
-      mtf: {
-        "1H":
-          mtf.MTF?.["1H"] ?? null,
-
-        "15M":
-          mtf.MTF?.["15M"] ?? null,
-
-        "5M":
-          mtf.MTF?.["5M"] ?? null,
-
-        alignment:
-          mtf.MTF?.alignment ?? null
-      },
-
-      structure: {
-        "1H_BOS":
-          mtf.MTF_CONFIRMATION?.HTF_BOS ?? null,
-
-        "5M_BOS":
-          mtf.MTF_CONFIRMATION?.LTF_BOS ?? null,
-
-        "1H_CHoCH":
-          mtf.MTF_CONFIRMATION?.["1H_CHoCH"] ?? null,
-
-        "15M_CHoCH":
-          mtf.MTF_CONFIRMATION?.["15M_CHoCH"] ?? null,
-
-        "5M_CHoCH":
-          mtf.MTF_CONFIRMATION?.["5M_CHoCH"] ?? null,
-
-        "1H_MSS":
-          mtf.MTF_CONFIRMATION?.["1H_MSS"] ?? null,
-
-        "15M_MSS":
-          mtf.MTF_CONFIRMATION?.["15M_MSS"] ?? null,
-
-        "5M_MSS":
-          mtf.MTF_CONFIRMATION?.["5M_MSS"] ?? null
-      },
-
-      details: {
-        RSI14:
-          a5.indicators?.RSI14 ?? null,
-
-        MACD:
-          a5.indicators?.MACD?.bias ?? "Unknown",
-
-        liquiditySweep:
-          a5.liquidity?.latestSweep ?? "None",
-
-        candleDirection:
-          a5.candle?.direction ?? "Neutral",
-
-        candleStrength:
-          a5.candle?.strength ?? "Unknown",
-
-        candlePatterns:
-          a5.candle?.patterns ?? [],
-
-        displacement:
-          a5.candle?.displacement ?? null
-      },
-
-      conditions
-    });
-
-  } catch (error) {
-
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-
-  }
-});
 app.listen(
   PORT,
   "0.0.0.0",
