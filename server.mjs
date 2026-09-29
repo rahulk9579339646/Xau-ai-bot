@@ -3105,7 +3105,7 @@ ${JSON.stringify(mtf, null, 2)}
             }
           ],
           temperature: 0.2,
-          max_tokens: 1200
+          max_tokens: 3000
         })
       }
     );
