@@ -8,6 +8,10 @@ const PORT = process.env.PORT || 10000;
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openai/gpt-5.4-mini";
+const OPENROUTER_FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL || "anthropic/claude-sonnet-4.6";
+
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID =
   process.env.TELEGRAM_CHAT_ID || "710410869";
@@ -164,55 +168,53 @@ async function getCandles(
 ========================================================= */
 
 async function sendTelegramMessage(message) {
-  if (
-    !TELEGRAM_BOT_TOKEN ||
-    !TELEGRAM_CHAT_ID
-  ) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     return {
       sent: false,
-      reason:
-        "Telegram environment variables not configured"
+      reason: "Telegram environment variables not configured"
     };
   }
 
   try {
-    const response =
-      await fetch(
+    const text = String(message ?? "");
+    const chunks = [];
+
+    for (let i = 0; i < text.length; i += 3900) {
+      chunks.push(text.slice(i, i + 3900));
+    }
+
+    if (!chunks.length) {
+      chunks.push("XAU AI BOT\n\nEmpty Telegram message.");
+    }
+
+    for (const chunk of chunks) {
+      const response = await fetch(
         `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
         {
           method: "POST",
-
           headers: {
-            "Content-Type":
-              "application/json"
+            "Content-Type": "application/json"
           },
-
           body: JSON.stringify({
-            chat_id:
-              TELEGRAM_CHAT_ID,
-
-            text: message
+            chat_id: TELEGRAM_CHAT_ID,
+            text: chunk
           })
         }
       );
 
-    const data =
-      await response.json();
+      const data = await response.json();
 
-    if (
-      !response.ok ||
-      !data.ok
-    ) {
-      return {
-        sent: false,
-        error:
-          data.description ||
-          "Telegram message failed"
-      };
+      if (!response.ok || !data.ok) {
+        return {
+          sent: false,
+          error: data.description || "Telegram message failed"
+        };
+      }
     }
 
     return {
-      sent: true
+      sent: true,
+      chunks: chunks.length
     };
   } catch (error) {
     return {
@@ -263,7 +265,7 @@ function buildTelegramMessage(mtf) {
       `\nBullish Reasons:\n` +
       entry.bullishReasons
         .slice(0, 8)
-        .map(x => `â€¢ ${x}`)
+        .map(x => `• ${x}`)
         .join("\n") +
       "\n";
   }
@@ -275,7 +277,7 @@ function buildTelegramMessage(mtf) {
       `\nBearish Reasons:\n` +
       entry.bearishReasons
         .slice(0, 8)
-        .map(x => `â€¢ ${x}`)
+        .map(x => `• ${x}`)
         .join("\n") +
       "\n";
   }
@@ -997,8 +999,7 @@ function candleAnalysis(
       "Bullish Rejection"
     );
   }
-
-  if (
+    if (
     upperWick >
       body * 2 &&
     lowerWick <
@@ -2995,8 +2996,7 @@ async function mtfAnalysis() {
           5
         )
     },
-
-    RETEST:
+        RETEST:
       retest,
 
     TRADE_LEVELS:
@@ -3045,17 +3045,12 @@ async function mtfAnalysis() {
    GEMINI AI
 ========================================================= */
 
-async function geminiAnalysis(
-  mtf
-) {
-  if (
-    !GEMINI_API_KEY
-  ) {
+async function openRouterAnalysis(mtf) {
+  if (!OPENROUTER_API_KEY) {
     return {
       available: false,
-
-      message:
-        "GEMINI_API_KEY not configured"
+      provider: "OpenRouter",
+      message: "OPENROUTER_API_KEY not configured"
     };
   }
 
@@ -3063,11 +3058,9 @@ async function geminiAnalysis(
 You are a financial market analysis assistant.
 
 Analyze XAUUSD using ONLY the supplied technical engine output.
-
 Do not invent price data.
 
 Explain:
-
 1. 1H bias
 2. 15M bias
 3. 5M bias
@@ -3082,84 +3075,173 @@ Explain:
 12. Why the engine is BUY, SELL or WAITING
 
 If confirmation is insufficient, explicitly say WAITING.
-
 Do not claim certainty or guaranteed profit.
 
 DATA:
-
-${JSON.stringify(
-  mtf,
-  null,
-  2
-)}
+${JSON.stringify(mtf, null, 2)}
 `;
 
   try {
-    const response =
-      await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
-        {
-          method: "POST",
+    const response = await fetch(
+      "https://openrouter.ai/api/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://xau-ai-bot-1.onrender.com",
+          "X-Title": "XAU AI Strong Market Analysis Engine"
+        },
+        body: JSON.stringify({
+          model: OPENROUTER_MODEL,
+          models: [
+            OPENROUTER_MODEL,
+            OPENROUTER_FALLBACK_MODEL
+          ],
+          messages: [
+            {
+              role: "user",
+              content: prompt
+            }
+          ]
+        })
+      }
+    );
 
-          headers: {
-            "Content-Type":
-              "application/json",
+    const json = await response.json();
 
-            "x-goog-api-key":
-              GEMINI_API_KEY
-          },
-
-          body:
-            JSON.stringify({
-              contents: [
-                {
-                  parts: [
-                    {
-                      text:
-                        prompt
-                    }
-                  ]
-                }
-              ]
-            })
-        }
-      );
-
-    const json =
-      await response.json();
-
-    if (
-      !response.ok
-    ) {
+    if (!response.ok) {
       return {
         available: false,
-
-        error:
-          json.error?.message ||
-          "Gemini request failed"
+        provider: "OpenRouter",
+        error: json.error?.message || "OpenRouter request failed"
       };
     }
 
     const text =
-      json.candidates?.[0]
-        ?.content?.parts?.[0]
-        ?.text ||
+      json.choices?.[0]?.message?.content ||
       "";
+
+    if (!text) {
+      return {
+        available: false,
+        provider: "OpenRouter",
+        error: "OpenRouter returned an empty response"
+      };
+    }
 
     return {
       available: true,
+      provider: "OpenRouter",
+      model: json.model || OPENROUTER_MODEL,
       text
     };
-  } catch (
-    error
-  ) {
+  } catch (error) {
     return {
       available: false,
-
-      error:
-        error.message
+      provider: "OpenRouter",
+      error: error.message
     };
   }
+}
+
+async function geminiAnalysis(mtf) {
+  const prompt = `
+You are a financial market analysis assistant.
+
+Analyze XAUUSD using ONLY the supplied technical engine output.
+Do not invent price data.
+
+Explain:
+1. 1H bias
+2. 15M bias
+3. 5M bias
+4. Market structure
+5. BOS / CHoCH / MSS
+6. Liquidity
+7. FVG
+8. Order blocks
+9. Retest
+10. Entry confirmation
+11. Invalidation
+12. Why the engine is BUY, SELL or WAITING
+
+If confirmation is insufficient, explicitly say WAITING.
+Do not claim certainty or guaranteed profit.
+
+DATA:
+${JSON.stringify(mtf, null, 2)}
+`;
+
+  if (GEMINI_API_KEY) {
+    try {
+      const response = await fetch(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  { text: prompt }
+                ]
+              }
+            ]
+          })
+        }
+      );
+
+      const json = await response.json();
+
+      if (response.ok) {
+        const text =
+          json.candidates?.[0]?.content?.parts?.[0]?.text ||
+          "";
+
+        if (text) {
+          return {
+            available: true,
+            provider: "Gemini",
+            model: "gemini-3.8-flash",
+            text
+          };
+        }
+      }
+
+      console.log(
+        "Gemini failed; trying OpenRouter fallback:",
+        json.error?.message || "empty Gemini response"
+      );
+    } catch (error) {
+      console.log(
+        "Gemini request error; trying OpenRouter fallback:",
+        error.message
+      );
+    }
+  } else {
+    console.log(
+      "GEMINI_API_KEY not configured; trying OpenRouter fallback."
+    );
+  }
+
+  const fallback = await openRouterAnalysis(mtf);
+
+  if (fallback.available) {
+    return fallback;
+  }
+
+  return {
+    available: false,
+    provider: "Gemini + OpenRouter",
+    error:
+      fallback.error ||
+      fallback.message ||
+      "Gemini and OpenRouter analysis unavailable"
+  };
 }
 
 /* =========================================================
@@ -3460,7 +3542,7 @@ function buildHourlyTelegramMessage(
   } else {
     message +=
       `\nTRADE LEVELS\n` +
-      `No confirmed trade levels â€” engine is still waiting.\n`;
+      `No confirmed trade levels — engine is still waiting.\n`;
   }
 
   if (
@@ -3472,7 +3554,7 @@ function buildHourlyTelegramMessage(
       entry.bullishReasons
         .slice(0, 8)
         .map(
-          x => `â€¢ ${x}`
+          x => `• ${x}`
         )
         .join("\n") +
 
@@ -3488,7 +3570,7 @@ function buildHourlyTelegramMessage(
       entry.bearishReasons
         .slice(0, 8)
         .map(
-          x => `â€¢ ${x}`
+          x => `• ${x}`
         )
         .join("\n") +
 
@@ -3500,7 +3582,7 @@ function buildHourlyTelegramMessage(
     ai.text
   ) {
     message +=
-      `\nGEMINI AI\n` +
+      `\nAI ANALYSIS\n` +
       ai.text.slice(
         0,
         3000
@@ -3508,7 +3590,7 @@ function buildHourlyTelegramMessage(
       "\n";
   } else if (ai) {
     message +=
-      `\nGEMINI AI\n` +
+      `\nAI ANALYSIS\n` +
       `Unavailable: ${
         ai.error ||
         ai.message ||
@@ -3883,9 +3965,7 @@ app.get(
       });
     }
   }
-);
-
-/* =========================================================
+);/* =========================================================
    SERVER
 ========================================================= */
 
