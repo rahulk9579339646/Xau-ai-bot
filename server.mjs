@@ -3103,7 +3103,9 @@ ${JSON.stringify(mtf, null, 2)}
               role: "user",
               content: prompt
             }
-          ]
+          ],
+          temperature: 0.2,
+          max_tokens: 1200
         })
       }
     );
