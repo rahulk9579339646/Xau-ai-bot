@@ -149,41 +149,26 @@ function normalizeCandles(values) {
 
 function normalizeBiquoteCandles(bars) {
   return bars
-    .filter(
-      x => !x.isOpen
-    )
-    .map(x => ({
-      time:
-        x.openTime,
+    .filter(x => !x.isOpen)
+    .map(x => {
+      const actualVolume = num(x.volume);
+      const tickVolume = num(x.tickVolume);
 
-      open:
-        num(x.open),
+      return {
+        time: x.openTime,
+        open: num(x.open),
+        high: num(x.high),
+        low: num(x.low),
+        close: num(x.close),
 
-      high:
-        num(x.high),
-
-      low:
-        num(x.low),
-
-      close:
-        num(x.close),
-
-      volume:
-        (() => {
-          const realVolume =
-            num(x.volume);
-
-          const tickVolume =
-            num(x.tickVolume);
-
-          return (
-            realVolume !== null &&
-            realVolume > 0
-          )
-            ? realVolume
-            : tickVolume;
-        })()
-    }))
+        // Actual volume available असेल तर ते,
+        // नाहीतर tickVolume वापरायचा.
+        volume:
+          actualVolume > 0
+            ? actualVolume
+            : tickVolume
+      };
+    })
     .filter(
       x =>
         x.time &&
@@ -192,9 +177,7 @@ function normalizeBiquoteCandles(bars) {
           x.high,
           x.low,
           x.close
-        ].every(
-          Number.isFinite
-        )
+        ].every(Number.isFinite)
     )
     .sort(
       (a, b) =>
@@ -3569,48 +3552,35 @@ function buildTradeLevels(
   };
 }
 
-
-/* =========================================================
-   ENTRY CONFIRMATION
-========================================================= */
-
 function entryConfirmation(
   a1,
   a15,
   a5,
   retest
 ) {
-  let bullishScore =
-    0;
+  let bullishScore = 0;
+  let bearishScore = 0;
 
-  let bearishScore =
-    0;
+  const bullishReasons = [];
+  const bearishReasons = [];
 
-  const bullishReasons =
-    [];
-
-  const bearishReasons =
-    [];
+  /* =====================================================
+     BASIC DIRECTION CONDITIONS
+  ===================================================== */
 
   const bullishStructureBreak =
-    a5.breakDirection ===
-    "Bullish";
+    a5.breakDirection === "Bullish";
 
   const bearishStructureBreak =
-    a5.breakDirection ===
-    "Bearish";
+    a5.breakDirection === "Bearish";
 
   const bullishTechnical =
-    a5.indicators?.RSI14 >
-      50 &&
-    a5.indicators?.MACD?.bias ===
-      "Bullish";
+    a5.indicators?.RSI14 > 50 &&
+    a5.indicators?.MACD?.bias === "Bullish";
 
   const bearishTechnical =
-    a5.indicators?.RSI14 <
-      50 &&
-    a5.indicators?.MACD?.bias ===
-      "Bearish";
+    a5.indicators?.RSI14 < 50 &&
+    a5.indicators?.MACD?.bias === "Bearish";
 
   const bullishHTF =
     a1.structure.structure !==
@@ -3620,53 +3590,9 @@ function entryConfirmation(
     a1.structure.structure !==
     "Bullish Structure";
 
-  const bullish15M =
-    a15.structure.structure ===
-    "Bullish Structure";
-
-  const bearish15M =
-    a15.structure.structure ===
-    "Bearish Structure";
-
-  const bullishLiquidity =
-    a5.liquidity?.latestSweep ===
-    "Bullish Liquidity Sweep";
-
-  const bearishLiquidity =
-    a5.liquidity?.latestSweep ===
-    "Bearish Liquidity Sweep";
-
-  const bullishCandle =
-    a5.candle?.direction ===
-      "Bullish" &&
-    (
-      a5.candle?.strength ===
-        "Strong" ||
-      a5.candle?.patterns?.includes(
-        "Bullish Engulfing"
-      ) ||
-      a5.candle?.patterns?.includes(
-        "Bullish Rejection"
-      )
-    );
-
-  const bearishCandle =
-    a5.candle?.direction ===
-      "Bearish" &&
-    (
-      a5.candle?.strength ===
-        "Strong" ||
-      a5.candle?.patterns?.includes(
-        "Bearish Engulfing"
-      ) ||
-      a5.candle?.patterns?.includes(
-        "Bearish Rejection"
-      )
-    );
-
-  /* =========================
+  /* =====================================================
      BULLISH SCORE
-  ========================= */
+  ===================================================== */
 
   if (
     a1.structure.structure ===
@@ -3680,7 +3606,8 @@ function entryConfirmation(
   }
 
   if (
-    bullish15M
+    a15.structure.structure ===
+    "Bullish Structure"
   ) {
     bullishScore += 1;
 
@@ -3711,8 +3638,7 @@ function entryConfirmation(
   }
 
   if (
-    a5.indicators?.RSI14 >
-    50
+    a5.indicators?.RSI14 > 50
   ) {
     bullishScore += 1;
 
@@ -3733,7 +3659,8 @@ function entryConfirmation(
   }
 
   if (
-    bullishLiquidity
+    a5.liquidity?.latestSweep ===
+    "Bullish Liquidity Sweep"
   ) {
     bullishScore += 2;
 
@@ -3742,8 +3669,20 @@ function entryConfirmation(
     );
   }
 
+  const bullishCandleConfirmation =
+    a5.candle?.direction === "Bullish" &&
+    (
+      a5.candle?.strength === "Strong" ||
+      a5.candle?.patterns?.includes(
+        "Bullish Engulfing"
+      ) ||
+      a5.candle?.patterns?.includes(
+        "Bullish Rejection"
+      )
+    );
+
   if (
-    bullishCandle
+    bullishCandleConfirmation
   ) {
     bullishScore += 1;
 
@@ -3752,9 +3691,9 @@ function entryConfirmation(
     );
   }
 
-  /* =========================
+  /* =====================================================
      BEARISH SCORE
-  ========================= */
+  ===================================================== */
 
   if (
     a1.structure.structure ===
@@ -3768,7 +3707,8 @@ function entryConfirmation(
   }
 
   if (
-    bearish15M
+    a15.structure.structure ===
+    "Bearish Structure"
   ) {
     bearishScore += 1;
 
@@ -3799,8 +3739,7 @@ function entryConfirmation(
   }
 
   if (
-    a5.indicators?.RSI14 <
-    50
+    a5.indicators?.RSI14 < 50
   ) {
     bearishScore += 1;
 
@@ -3821,7 +3760,8 @@ function entryConfirmation(
   }
 
   if (
-    bearishLiquidity
+    a5.liquidity?.latestSweep ===
+    "Bearish Liquidity Sweep"
   ) {
     bearishScore += 2;
 
@@ -3830,8 +3770,20 @@ function entryConfirmation(
     );
   }
 
+  const bearishCandleConfirmation =
+    a5.candle?.direction === "Bearish" &&
+    (
+      a5.candle?.strength === "Strong" ||
+      a5.candle?.patterns?.includes(
+        "Bearish Engulfing"
+      ) ||
+      a5.candle?.patterns?.includes(
+        "Bearish Rejection"
+      )
+    );
+
   if (
-    bearishCandle
+    bearishCandleConfirmation
   ) {
     bearishScore += 1;
 
@@ -3840,9 +3792,41 @@ function entryConfirmation(
     );
   }
 
-  /* =========================
-     A+ STRICT SETUP
-  ========================= */
+  /* =====================================================
+     PRICE-ACTION CONFIRMATIONS
+     
+     A-grade साठी किमान 2 independent confirmations.
+  ===================================================== */
+
+  const bullishRetest =
+    retest?.bullishRetestConfirmed === true;
+
+  const bearishRetest =
+    retest?.bearishRetestConfirmed === true;
+
+  const bullishPriceActionConfirmations = [
+    bullishStructureBreak,
+    a15.breakDirection === "Bullish",
+    a5.liquidity?.latestSweep ===
+      "Bullish Liquidity Sweep",
+    bullishCandleConfirmation,
+    bullishRetest
+  ].filter(Boolean).length;
+
+  const bearishPriceActionConfirmations = [
+    bearishStructureBreak,
+    a15.breakDirection === "Bearish",
+    a5.liquidity?.latestSweep ===
+      "Bearish Liquidity Sweep",
+    bearishCandleConfirmation,
+    bearishRetest
+  ].filter(Boolean).length;
+
+  /* =====================================================
+     A+ CONFIRMATION
+     
+     जुना strict rule जसाच्या तसा.
+  ===================================================== */
 
   const bullishAPlus =
     bullishStructureBreak &&
@@ -3860,118 +3844,172 @@ function entryConfirmation(
     bearishScore >
       bullishScore + 2;
 
-  /* =========================
-     A-GRADE INTRADAY SETUP
-  ========================= */
+  /* =====================================================
+     A-GRADE CONFIRMATION
+     
+     5M BOS compulsory नाही.
+     पण खालील protection compulsory:
+     
+     1. HTF opposite नसावा
+     2. 5M technical agreement
+     3. Score >= 6
+     4. Score difference > 2
+     5. किमान 2 price-action confirmations
+     6. opposite 5M break नसावा
+  ===================================================== */
 
-  const bullishPriceActionConfirmations =
-    Number(
-      bullishLiquidity
-    ) +
-    Number(
-      bullishCandle
-    ) +
-    Number(
-      a15.breakDirection ===
-      "Bullish"
-    );
-
-  const bearishPriceActionConfirmations =
-    Number(
-      bearishLiquidity
-    ) +
-    Number(
-      bearishCandle
-    ) +
-    Number(
-      a15.breakDirection ===
-      "Bearish"
-    );
-
-  const bullishA =
-    !bullishAPlus &&
-    bullishHTF &&
-    bullish15M &&
+  const bullishAGrade =
+    !bullishStructureBreak &&
+    !bearishStructureBreak &&
     bullishTechnical &&
+    bullishHTF &&
+    (
+      a15.structure.structure ===
+        "Bullish Structure" ||
+      a15.breakDirection ===
+        "Bullish"
+    ) &&
     bullishScore >= 6 &&
     bullishScore >
       bearishScore + 2 &&
-    bullishPriceActionConfirmations >= 2 &&
-    !bearishStructureBreak;
+    bullishPriceActionConfirmations >= 2;
 
-  const bearishA =
-    !bearishAPlus &&
-    bearishHTF &&
-    bearish15M &&
+  const bearishAGrade =
+    !bullishStructureBreak &&
+    !bearishStructureBreak &&
     bearishTechnical &&
+    bearishHTF &&
+    (
+      a15.structure.structure ===
+        "Bearish Structure" ||
+      a15.breakDirection ===
+        "Bearish"
+    ) &&
     bearishScore >= 6 &&
     bearishScore >
       bullishScore + 2 &&
-    bearishPriceActionConfirmations >= 2 &&
-    !bullishStructureBreak;
+    bearishPriceActionConfirmations >= 2;
 
-  let status =
-    "WAITING";
+  /* =====================================================
+     FINAL DECISION
+  ===================================================== */
 
-  let direction =
-    "None";
+  let status = "WAITING";
+  let direction = "None";
+  let confirmationGrade = "NONE";
+  let potentialSetup = false;
 
-  let confirmationGrade =
-    "NONE";
+  if (bullishAPlus) {
+    status = "BUY CONFIRMED";
+    direction = "BUY";
+    confirmationGrade = "A+";
+    potentialSetup = true;
+
+  } else if (bearishAPlus) {
+    status = "SELL CONFIRMED";
+    direction = "SELL";
+    confirmationGrade = "A+";
+    potentialSetup = true;
+
+  } else if (bullishAGrade) {
+    status = "BUY CONFIRMED";
+    direction = "BUY";
+    confirmationGrade = "A";
+    potentialSetup = true;
+
+  } else if (bearishAGrade) {
+    status = "SELL CONFIRMED";
+    direction = "SELL";
+    confirmationGrade = "A";
+    potentialSetup = true;
+  }
+
+  /* =====================================================
+     REJECTION REASON
+  ===================================================== */
+
+  const rejectionReasons = [];
 
   if (
-    bullishAPlus
+    !bullishStructureBreak &&
+    !bearishStructureBreak
   ) {
-    status =
-      "BUY CONFIRMED";
-
-    direction =
-      "BUY";
-
-    confirmationGrade =
-      "A+";
-  } else if (
-    bearishAPlus
-  ) {
-    status =
-      "SELL CONFIRMED";
-
-    direction =
-      "SELL";
-
-    confirmationGrade =
-      "A+";
-  } else if (
-    bullishA
-  ) {
-    status =
-      "BUY CONFIRMED";
-
-    direction =
-      "BUY";
-
-    confirmationGrade =
-      "A";
-
-    bullishReasons.push(
-      "A-grade intraday confirmation"
-    );
-  } else if (
-    bearishA
-  ) {
-    status =
-      "SELL CONFIRMED";
-
-    direction =
-      "SELL";
-
-    confirmationGrade =
-      "A";
-
-    bearishReasons.push(
-      "A-grade intraday confirmation"
+    rejectionReasons.push(
+      "5M structure break not confirmed"
     );
   }
+
+  if (
+    Math.abs(
+      bullishScore - bearishScore
+    ) <= 2
+  ) {
+    rejectionReasons.push(
+      "Bullish/Bearish score difference is too small"
+    );
+  }
+
+  if (
+    Math.max(
+      bullishPriceActionConfirmations,
+      bearishPriceActionConfirmations
+    ) < 2
+  ) {
+    rejectionReasons.push(
+      "Not enough price-action/liquidity confirmation"
+    );
+  }
+
+  if (
+    !bullishTechnical &&
+    !bearishTechnical
+  ) {
+    rejectionReasons.push(
+      "5M technical confirmation unavailable"
+    );
+  }
+
+  return {
+    status,
+
+    direction,
+
+    confirmationGrade,
+
+    potentialSetup,
+
+    bullishScore,
+
+    bearishScore,
+
+    bullishReasons,
+
+    bearishReasons,
+
+    bullishTechnical,
+
+    bearishTechnical,
+
+    bullishHTF,
+
+    bearishHTF,
+
+    bullishStructureBreak,
+
+    bearishStructureBreak,
+
+    bullishPriceActionConfirmations,
+
+    bearishPriceActionConfirmations,
+
+    retest,
+
+    rejectionReason:
+      status === "WAITING"
+        ? rejectionReasons.join("; ")
+        : null
+  };
+}
 
   /* =========================
      WAITING DIAGNOSTIC
@@ -4717,47 +4755,268 @@ ${JSON.stringify(
    AI ANALYSIS SELECTOR
 ========================================================= */
 
-async function runAIAnalysis(
-  mtf
-) {
-  /*
-    OpenRouter is primary.
-    Gemini remains a secondary fallback.
-
-    AI failure must NEVER break
-    the technical analysis engine.
-  */
-
-  const openRouter =
-    await openRouterAnalysis(
-      mtf
-    );
-
-  if (
-    openRouter.available
-  ) {
+async function openRouterAnalysis(mtf) {
+  if (!OPENROUTER_API_KEY) {
     return {
-      available:
-        true,
-
-      provider:
-        openRouter.provider,
-
-      model:
-        openRouter.model,
-
-      usage:
-        openRouter.usage,
-
-      text:
-        openRouter.text,
-
-      fallbackUsed:
-        openRouter.model &&
-        openRouter.model !==
-          OPENROUTER_MODEL
+      available: false,
+      provider: "OpenRouter",
+      message:
+        "OPENROUTER_API_KEY not configured"
     };
   }
+
+  const entry =
+    mtf.ENTRY_CONFIRMATION || {};
+
+  const a1 =
+    mtf.analysis?.["1H"] || {};
+
+  const a15 =
+    mtf.analysis?.["15M"] || {};
+
+  const a5 =
+    mtf.analysis?.["5M"] || {};
+
+  /*
+    पूर्ण MTF JSON पाठवायचा नाही.
+    त्यामुळे input tokens कमी होतात.
+  */
+
+  const compactData = {
+    price:
+      entry.currentPrice ??
+      mtf.importantLevels?.currentPrice,
+
+    mtf: mtf.MTF,
+
+    structure:
+      mtf.MTF_STRUCTURE,
+
+    confirmation: {
+      status:
+        entry.status,
+
+      direction:
+        entry.direction,
+
+      grade:
+        entry.confirmationGrade,
+
+      bullishScore:
+        entry.bullishScore,
+
+      bearishScore:
+        entry.bearishScore,
+
+      bullishReasons:
+        entry.bullishReasons?.slice(0, 6),
+
+      bearishReasons:
+        entry.bearishReasons?.slice(0, 6),
+
+      bullishPA:
+        entry.bullishPriceActionConfirmations,
+
+      bearishPA:
+        entry.bearishPriceActionConfirmations,
+
+      rejection:
+        entry.rejectionReason
+    },
+
+    structureBreaks: {
+      "1H": {
+        BOS: a1.BOS,
+        CHoCH: a1.CHoCH,
+        MSS: a1.MSS
+      },
+
+      "15M": {
+        BOS: a15.BOS,
+        CHoCH: a15.CHoCH,
+        MSS: a15.MSS
+      },
+
+      "5M": {
+        BOS: a5.BOS,
+        CHoCH: a5.CHoCH,
+        MSS: a5.MSS
+      }
+    },
+
+    technical: {
+      "1H": {
+        trend: a1.trend,
+        RSI:
+          a1.indicators?.RSI14,
+        MACD:
+          a1.indicators?.MACD?.bias
+      },
+
+      "15M": {
+        trend: a15.trend,
+        RSI:
+          a15.indicators?.RSI14,
+        MACD:
+          a15.indicators?.MACD?.bias
+      },
+
+      "5M": {
+        trend: a5.trend,
+        RSI:
+          a5.indicators?.RSI14,
+        MACD:
+          a5.indicators?.MACD?.bias
+      }
+    },
+
+    liquidity: {
+      "5M":
+        a5.liquidity?.latestSweep
+    },
+
+    candle: {
+      "5M":
+        a5.candle
+    },
+
+    retest:
+      mtf.RETEST,
+
+    invalidation:
+      mtf.INVALIDATION,
+
+    levels:
+      mtf.importantLevels
+  };
+
+  const prompt =
+`Analyze XAUUSD using ONLY this engine output.
+
+Return a concise technical explanation.
+
+Cover:
+1H, 15M and 5M bias;
+market structure;
+BOS/CHoCH/MSS;
+liquidity;
+price action;
+retest;
+entry confirmation;
+invalidation.
+
+Most important:
+Respect the engine decision.
+If status is WAITING, say WAITING.
+Do not invent data.
+Do not give guaranteed-profit claims.
+
+ENGINE:
+${JSON.stringify(
+  compactData
+)}`;
+
+  try {
+    const response =
+      await fetch(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          method: "POST",
+
+          headers: {
+            "Authorization":
+              `Bearer ${OPENROUTER_API_KEY}`,
+
+            "Content-Type":
+              "application/json",
+
+            "HTTP-Referer":
+              "https://xau-ai-bot-1.onrender.com",
+
+            "X-Title":
+              "XAU AI Strong Market Analysis Engine"
+          },
+
+          body:
+            JSON.stringify({
+              model:
+                OPENROUTER_MODEL,
+
+              models: [
+                OPENROUTER_MODEL,
+                OPENROUTER_FALLBACK_MODEL
+              ],
+
+              messages: [
+                {
+                  role: "user",
+                  content: prompt
+                }
+              ],
+
+              temperature: 0.2,
+
+              /*
+                आधी 3000 होता.
+                आता credit कमी असतानाही request
+                fail होऊ नये म्हणून output छोटा.
+              */
+              max_tokens: 750
+            })
+        }
+      );
+
+    const json =
+      await response.json();
+
+    if (!response.ok) {
+      return {
+        available: false,
+        provider: "OpenRouter",
+        error:
+          json.error?.message ||
+          "OpenRouter request failed"
+      };
+    }
+
+    const text =
+      json.choices?.[0]?.message?.content ||
+      "";
+
+    if (!text) {
+      return {
+        available: false,
+        provider: "OpenRouter",
+        error:
+          "OpenRouter returned an empty response"
+      };
+    }
+
+    return {
+      available: true,
+
+      provider:
+        "OpenRouter",
+
+      model:
+        json.model ||
+        OPENROUTER_MODEL,
+
+      text
+    };
+
+  } catch (error) {
+    return {
+      available: false,
+
+      provider:
+        "OpenRouter",
+
+      error:
+        error.message
+    };
+  }
+}
 
   const gemini =
     await geminiAnalysis(
