@@ -27,6 +27,7 @@ const TF = {
 
 const CACHE = new Map();
 const CACHE_MS = 15000;
+const TRENDLINE_ALERT_STATE = new Map();
 
 /* =========================================================
    BASIC HELPERS
@@ -112,7 +113,9 @@ function normalizeBiquoteCandles(bars) {
       volume: (() => {
         const actualVolume = num(x.volume);
         const tickVolume = num(x.tickVolume);
-        return actualVolume > 0 ? actualVolume : tickVolume;
+        return actualVolume !== null && actualVolume > 0
+          ? actualVolume
+          : tickVolume;
       })()
     }))
     .filter(
@@ -2305,6 +2308,761 @@ function buildRetest(
 }
 
 /* =========================================================
+   TRENDLINE ENGINE
+========================================================= */
+
+function buildTrendline(points) {
+  if (!Array.isArray(points) || points.length < 2) {
+    return null;
+  }
+
+  const p1 = points[points.length - 2];
+  const p2 = points[points.length - 1];
+
+  if (
+    !p1 ||
+    !p2 ||
+    p2.index <= p1.index ||
+    !Number.isFinite(p1.price) ||
+    !Number.isFinite(p2.price)
+  ) {
+    return null;
+  }
+
+  const slope =
+    (p2.price - p1.price) /
+    (p2.index - p1.index);
+
+  return {
+    start: p1,
+    end: p2,
+    slope,
+    priceAt(index) {
+      return p1.price + slope * (index - p1.index);
+    }
+  };
+}
+
+function trendlineVolumeConfirmation(candles, breakoutIndex) {
+  const current = candles[breakoutIndex];
+  if (!current) {
+    return {
+      available: false,
+      confirmed: false,
+      state: "Unavailable",
+      ratio: null
+    };
+  }
+
+  const values = candles
+    .slice(Math.max(0, breakoutIndex - 20), breakoutIndex)
+    .map(x => x.volume)
+    .filter(Number.isFinite);
+
+  if (values.length < 10 || !Number.isFinite(current.volume)) {
+    return {
+      available: false,
+      confirmed: false,
+      state: "Unavailable",
+      ratio: null
+    };
+  }
+
+  const baseline = avg(values);
+  if (!Number.isFinite(baseline) || baseline <= 0) {
+    return {
+      available: false,
+      confirmed: false,
+      state: "Unavailable",
+      ratio: null
+    };
+  }
+
+  const ratio = current.volume / baseline;
+
+  return {
+    available: true,
+    confirmed: ratio >= 1.2,
+    state:
+      ratio >= 1.5
+        ? "Strong Volume"
+        : ratio >= 1.2
+          ? "Above Average"
+          : "Normal/Low",
+    current: round(current.volume, 2),
+    average20: round(baseline, 2),
+    ratio: round(ratio, 2)
+  };
+}
+
+function findTrendlineBreakout(candles, direction, maxBars = 24) {
+  if (!Array.isArray(candles) || candles.length < 40) {
+    return {
+      direction: "None",
+      confirmed: false,
+      trendline: null,
+      breakoutIndex: null,
+      breakoutPrice: null,
+      strength: "None",
+      candle: null,
+      volume: {
+        available: false,
+        confirmed: false,
+        state: "Unavailable",
+        ratio: null
+      },
+      retest: null,
+      projectionDistance: null,
+      targetProjection: null
+    };
+  }
+
+  const swings = detectSwings(candles, 2, 2);
+  const atrValue = atr(candles, 14) || 0;
+  const tolerance = atrValue > 0 ? atrValue * 0.08 : 0.5;
+  const endIndex = candles.length - 1;
+
+  let points;
+  let trendline;
+  let breakoutIndex = null;
+  let breakoutCandle = null;
+
+  if (direction === "Bullish") {
+    const descendingHighs = swings.highs.filter((p, i, arr) => {
+      if (i < 1) return false;
+      const prev = arr[i - 1];
+      return p.price < prev.price;
+    });
+
+    points = descendingHighs.slice(-2);
+    trendline = buildTrendline(points);
+
+    if (trendline && trendline.slope < 0) {
+      for (let i = Math.max(0, trendline.end.index + 1); i <= endIndex; i++) {
+        const c = candles[i];
+        const line = trendline.priceAt(i);
+        const prev = candles[i - 1];
+        if (
+          c.close > line + tolerance * 0.15 &&
+          prev.close <= trendline.priceAt(i - 1) + tolerance * 0.15
+        ) {
+          breakoutIndex = i;
+          breakoutCandle = c;
+          break;
+        }
+      }
+    }
+  } else if (direction === "Bearish") {
+    const ascendingLows = swings.lows.filter((p, i, arr) => {
+      if (i < 1) return false;
+      const prev = arr[i - 1];
+      return p.price > prev.price;
+    });
+
+    points = ascendingLows.slice(-2);
+    trendline = buildTrendline(points);
+
+    if (trendline && trendline.slope > 0) {
+      for (let i = Math.max(0, trendline.end.index + 1); i <= endIndex; i++) {
+        const c = candles[i];
+        const line = trendline.priceAt(i);
+        const prev = candles[i - 1];
+        if (
+          c.close < line - tolerance * 0.15 &&
+          prev.close >= trendline.priceAt(i - 1) - tolerance * 0.15
+        ) {
+          breakoutIndex = i;
+          breakoutCandle = c;
+          break;
+        }
+      }
+    }
+  }
+
+  if (
+    !trendline ||
+    breakoutIndex === null ||
+    !breakoutCandle ||
+    endIndex - breakoutIndex > maxBars
+  ) {
+    return {
+      direction,
+      confirmed: false,
+      trendline: trendline
+        ? {
+            start: trendline.start,
+            end: trendline.end,
+            slope: round(trendline.slope, 8),
+            currentLine: round(trendline.priceAt(endIndex), 5)
+          }
+        : null,
+      breakoutIndex: null,
+      breakoutPrice: null,
+      strength: "None",
+      candle: null,
+      volume: {
+        available: false,
+        confirmed: false,
+        state: "Unavailable",
+        ratio: null
+      },
+      retest: null,
+      projectionDistance: null,
+      targetProjection: null
+    };
+  }
+
+  const range = breakoutCandle.high - breakoutCandle.low;
+  const body = Math.abs(breakoutCandle.close - breakoutCandle.open);
+  const bodyRatio = range > 0 ? body / range : 0;
+  const closeLocation =
+    range > 0
+      ? direction === "Bullish"
+        ? (breakoutCandle.close - breakoutCandle.low) / range
+        : (breakoutCandle.high - breakoutCandle.close) / range
+      : 0;
+
+  const strongCandle = bodyRatio >= 0.55 && closeLocation >= 0.65;
+  const displacement =
+    atrValue > 0 && range >= atrValue * 1.1 && bodyRatio >= 0.6;
+
+  const strength =
+    displacement
+      ? "Strong"
+      : strongCandle
+        ? "Valid"
+        : "Weak";
+
+  const volume = trendlineVolumeConfirmation(candles, breakoutIndex);
+
+  let retest = {
+    occurred: false,
+    held: false,
+    index: null,
+    price: null,
+    line: null
+  };
+
+  for (let i = breakoutIndex + 1; i <= endIndex; i++) {
+    const c = candles[i];
+    const line = trendline.priceAt(i);
+
+    if (direction === "Bullish") {
+      const touched = c.low <= line + tolerance;
+      const held = touched && c.close > line;
+      if (touched) {
+        retest = {
+          occurred: true,
+          held,
+          index: i,
+          price: round(c.close, 5),
+          line: round(line, 5)
+        };
+        if (held) break;
+      }
+    } else {
+      const touched = c.high >= line - tolerance;
+      const held = touched && c.close < line;
+      if (touched) {
+        retest = {
+          occurred: true,
+          held,
+          index: i,
+          price: round(c.close, 5),
+          line: round(line, 5)
+        };
+        if (held) break;
+      }
+    }
+  }
+
+  const lastCandle = candles[endIndex];
+  const lastLine = trendline.priceAt(endIndex);
+  const continuation =
+    direction === "Bullish"
+      ? lastCandle.close > lastLine &&
+        lastCandle.close >= lastCandle.open
+      : lastCandle.close < lastLine &&
+        lastCandle.close <= lastCandle.open;
+
+  const referencePoint =
+    direction === "Bullish"
+      ? swings.lows
+          .filter(x => x.index < breakoutIndex)
+          .slice(-1)[0]
+      : swings.highs
+          .filter(x => x.index < breakoutIndex)
+          .slice(-1)[0];
+
+  const projectionDistance = referencePoint
+    ? Math.abs(
+        trendline.priceAt(referencePoint.index) -
+          referencePoint.price
+      )
+    : null;
+
+  const targetProjection =
+    Number.isFinite(projectionDistance) && projectionDistance > 0
+      ? direction === "Bullish"
+        ? breakoutCandle.close + projectionDistance
+        : breakoutCandle.close - projectionDistance
+      : null;
+
+  return {
+    direction,
+    confirmed: true,
+    trendline: {
+      start: trendline.start,
+      end: trendline.end,
+      slope: round(trendline.slope, 8),
+      currentLine: round(lastLine, 5)
+    },
+    breakoutIndex,
+    breakoutPrice: round(breakoutCandle.close, 5),
+    strength,
+    candle: {
+      bodyRatio: round(bodyRatio, 3),
+      closeLocation: round(closeLocation, 3),
+      displacement,
+      range: round(range, 5)
+    },
+    volume,
+    retest,
+    continuation,
+    projectionDistance: round(projectionDistance, 5),
+    targetProjection: round(targetProjection, 5)
+  };
+}
+
+function trendlineScoreForDirection(
+  direction,
+  t1,
+  t15,
+  t5
+) {
+  const isBullish = direction === "BUY";
+  const oneH = isBullish ? t1.bullish : t1.bearish;
+  const fifteen = isBullish ? t15.bullish : t15.bearish;
+  const five = isBullish ? t5.bullish : t5.bearish;
+
+  let score = 0;
+  const reasons = [];
+  const warnings = [];
+
+  if (oneH.confirmed) {
+    score += 1;
+    reasons.push("1H valid trendline");
+  }
+
+  if (oneH.confirmed && oneH.strength !== "Weak") {
+    score += 2;
+    reasons.push("1H breakout candle close confirmed");
+  }
+
+  if (oneH.strength === "Strong") {
+    score += 1;
+    reasons.push("1H breakout has strong displacement");
+  }
+
+  if (
+    fifteen.confirmed &&
+    fifteen.strength !== "Weak"
+  ) {
+    score += 2;
+    reasons.push("15M trendline confirmation");
+  } else if (fifteen.confirmed) {
+    warnings.push("15M breakout is weak");
+  }
+
+  const fiveStructure = isBullish
+    ? (
+        t5.analysis.structure.structure === "Bullish Structure" ||
+        t5.analysis.breakDirection === "Bullish" ||
+        t5.analysis.candle?.direction === "Bullish"
+      )
+    : (
+        t5.analysis.structure.structure === "Bearish Structure" ||
+        t5.analysis.breakDirection === "Bearish" ||
+        t5.analysis.candle?.direction === "Bearish"
+      );
+
+  const fiveMomentum = isBullish
+    ? (
+        t5.analysis.indicators?.RSI14 > 50 ||
+        t5.analysis.indicators?.MACD?.bias === "Bullish"
+      )
+    : (
+        t5.analysis.indicators?.RSI14 < 50 ||
+        t5.analysis.indicators?.MACD?.bias === "Bearish"
+      );
+
+  if (fiveStructure && fiveMomentum) {
+    score += 2;
+    reasons.push("5M entry direction confirmed");
+  } else if (fiveStructure) {
+    score += 1;
+    reasons.push("5M structure supports direction");
+    warnings.push("5M momentum is not fully aligned");
+  }
+
+  if (oneH.volume?.confirmed) {
+    score += 1;
+    reasons.push("1H volume confirmation");
+  }
+
+  if (oneH.retest?.occurred && oneH.retest?.held) {
+    score += 1;
+    reasons.push("1H breakout retest held");
+  } else if (oneH.retest?.occurred && !oneH.retest?.held) {
+    warnings.push("1H retest failed");
+  } else if (oneH.continuation) {
+    reasons.push("Strong continuation without retest");
+  }
+
+  const opposite = isBullish ? t15.bearish : t15.bullish;
+  if (opposite.confirmed && opposite.strength !== "Weak") {
+    warnings.push("Opposite 15M trendline breakout detected");
+    score -= 2;
+  }
+
+  return {
+    score,
+    reasons,
+    warnings,
+    retestRequired: false,
+    retestOccurred: !!oneH.retest?.occurred,
+    retestHeld: !!oneH.retest?.held,
+    continuation: !!oneH.continuation
+  };
+}
+
+function buildTrendlineTradeLevels(direction, a1, a15, a5, trendlineData) {
+  const currentPrice = a5.currentPrice;
+  if (!Number.isFinite(currentPrice)) return null;
+
+  const atrValue = a5.indicators?.ATR14;
+  if (!Number.isFinite(atrValue) || atrValue <= 0) return null;
+
+  const primary = direction === "BUY"
+    ? a5.structure?.latestSwingLow?.price
+    : a5.structure?.latestSwingHigh?.price;
+
+  const trendlineLine = direction === "BUY"
+    ? trendlineData?.bullish?.trendline?.currentLine
+    : trendlineData?.bearish?.trendline?.currentLine;
+
+  const retestLine = direction === "BUY"
+    ? trendlineData?.bullish?.retest?.line
+    : trendlineData?.bearish?.retest?.line;
+
+  const invalidationBase = Number.isFinite(retestLine)
+    ? retestLine
+    : Number.isFinite(trendlineLine)
+      ? trendlineLine
+      : primary;
+
+  const swingBuffer = atrValue * 0.12;
+  const structureBuffer = atrValue * 0.10;
+
+  let stopLoss;
+  if (direction === "BUY") {
+    const candidates = [
+      Number.isFinite(primary) ? primary - swingBuffer : null,
+      Number.isFinite(invalidationBase) ? invalidationBase - structureBuffer : null
+    ].filter(Number.isFinite);
+    stopLoss = candidates.length ? Math.max(...candidates) : currentPrice - atrValue * 0.7;
+  } else {
+    const candidates = [
+      Number.isFinite(primary) ? primary + swingBuffer : null,
+      Number.isFinite(invalidationBase) ? invalidationBase + structureBuffer : null
+    ].filter(Number.isFinite);
+    stopLoss = candidates.length ? Math.min(...candidates) : currentPrice + atrValue * 0.7;
+  }
+
+  if (
+    (direction === "BUY" && stopLoss >= currentPrice) ||
+    (direction === "SELL" && stopLoss <= currentPrice)
+  ) {
+    return null;
+  }
+
+  let risk = Math.abs(currentPrice - stopLoss);
+  const minimumRisk = atrValue * 0.35;
+  const maximumRisk = atrValue * 1.25;
+
+  if (risk < minimumRisk) {
+    stopLoss = direction === "BUY"
+      ? currentPrice - minimumRisk
+      : currentPrice + minimumRisk;
+    risk = minimumRisk;
+  }
+
+  if (!Number.isFinite(risk) || risk <= 0 || risk > maximumRisk) {
+    return null;
+  }
+
+  const projection = direction === "BUY"
+    ? trendlineData?.bullish?.targetProjection
+    : trendlineData?.bearish?.targetProjection;
+
+  const sr1 = direction === "BUY"
+    ? a5.supportResistance?.resistance
+    : a5.supportResistance?.support;
+  const sr2 = direction === "BUY"
+    ? a5.supportResistance?.nextResistance
+    : a5.supportResistance?.nextSupport;
+  const htfLevel = direction === "BUY"
+    ? a15.supportResistance?.nextResistance ?? a1.supportResistance?.resistance
+    : a15.supportResistance?.nextSupport ?? a1.supportResistance?.support;
+
+  const rawTargets = direction === "BUY"
+    ? [sr1, sr2, projection, htfLevel]
+    : [sr1, sr2, projection, htfLevel];
+
+  const validTargets = rawTargets
+    .filter(Number.isFinite)
+    .filter(x => direction === "BUY" ? x > currentPrice : x < currentPrice)
+    .filter((x, i, arr) => arr.findIndex(v => Math.abs(v - x) < atrValue * 0.05) === i)
+    .sort((a, b) => direction === "BUY" ? a - b : b - a);
+
+  const fallback = direction === "BUY"
+    ? [currentPrice + risk * 1.5, currentPrice + risk * 2.5, currentPrice + risk * 3.5]
+    : [currentPrice - risk * 1.5, currentPrice - risk * 2.5, currentPrice - risk * 3.5];
+
+  const targets = [];
+  for (const x of [...validTargets, ...fallback]) {
+    if (!targets.some(v => Math.abs(v - x) < atrValue * 0.05)) {
+      targets.push(x);
+    }
+    if (targets.length >= 3) break;
+  }
+
+  const tp1 = targets[0] ?? null;
+  const tp2 = targets[1] ?? null;
+  const tp3 = targets[2] ?? null;
+
+  const rr1 = Number.isFinite(tp1) ? Math.abs(tp1 - currentPrice) / risk : null;
+  if (!Number.isFinite(rr1) || rr1 < 1.2) {
+    return null;
+  }
+
+  return {
+    direction,
+    entry: round(currentPrice, 5),
+    stopLoss: round(stopLoss, 5),
+    risk: round(risk, 5),
+    takeProfit: {
+      TP1: round(tp1, 5),
+      TP2: round(tp2, 5),
+      TP3: round(tp3, 5)
+    },
+    targetMethod: "Trendline projection + nearby market structure",
+    trendlineProjection: round(projection, 5),
+    riskRewardTP1: round(rr1, 2)
+  };
+}
+
+function trendlineAnalysis(candles1H, candles15M, candles5M) {
+  const a1 = analyzeTimeframe(candles1H, "1H");
+  const a15 = analyzeTimeframe(candles15M, "15M");
+  const a5 = analyzeTimeframe(candles5M, "5M");
+
+  const trendlines = {
+    "1H": {
+      bullish: findTrendlineBreakout(candles1H, "Bullish", 24),
+      bearish: findTrendlineBreakout(candles1H, "Bearish", 24)
+    },
+    "15M": {
+      bullish: findTrendlineBreakout(candles15M, "Bullish", 32),
+      bearish: findTrendlineBreakout(candles15M, "Bearish", 32)
+    },
+    "5M": {
+      bullish: findTrendlineBreakout(candles5M, "Bullish", 24),
+      bearish: findTrendlineBreakout(candles5M, "Bearish", 24)
+    }
+  };
+
+  const bullish5 = trendlines["5M"].bullish;
+  const bearish5 = trendlines["5M"].bearish;
+
+  const bullishScoreData = trendlineScoreForDirection(
+    "BUY",
+    trendlines["1H"],
+    trendlines["15M"],
+    {
+      ...trendlines["5M"],
+      analysis: a5
+    }
+  );
+
+  const bearishScoreData = trendlineScoreForDirection(
+    "SELL",
+    trendlines["1H"],
+    trendlines["15M"],
+    {
+      ...trendlines["5M"],
+      analysis: a5
+    }
+  );
+
+  const bullishReady =
+    trendlines["1H"].bullish.confirmed &&
+    trendlines["15M"].bullish.confirmed &&
+    (bullish5.confirmed || bullishScoreData.continuation) &&
+    trendlines["1H"].bullish.strength !== "Weak" &&
+    trendlines["15M"].bullish.strength !== "Weak";
+
+  const bearishReady =
+    trendlines["1H"].bearish.confirmed &&
+    trendlines["15M"].bearish.confirmed &&
+    (bearish5.confirmed || bearishScoreData.continuation) &&
+    trendlines["1H"].bearish.strength !== "Weak" &&
+    trendlines["15M"].bearish.strength !== "Weak";
+
+  let status = "WAITING";
+  let direction = "None";
+  let score = Math.max(bullishScoreData.score, bearishScoreData.score);
+  let reasons = score === bullishScoreData.score
+    ? bullishScoreData.reasons
+    : bearishScoreData.reasons;
+  let warnings = score === bullishScoreData.score
+    ? bullishScoreData.warnings
+    : bearishScoreData.warnings;
+
+  if (
+    bullishReady &&
+    bullishScoreData.score >= 7 &&
+    bullishScoreData.score > bearishScoreData.score + 1
+  ) {
+    status = bullishScoreData.score >= 9
+      ? "BUY STRONG CONFIRMED"
+      : "BUY CONFIRMED";
+    direction = "BUY";
+    score = bullishScoreData.score;
+    reasons = bullishScoreData.reasons;
+    warnings = bullishScoreData.warnings;
+  } else if (
+    bearishReady &&
+    bearishScoreData.score >= 7 &&
+    bearishScoreData.score > bullishScoreData.score + 1
+  ) {
+    status = bearishScoreData.score >= 9
+      ? "SELL STRONG CONFIRMED"
+      : "SELL CONFIRMED";
+    direction = "SELL";
+    score = bearishScoreData.score;
+    reasons = bearishScoreData.reasons;
+    warnings = bearishScoreData.warnings;
+  }
+
+  const levels = direction === "BUY"
+    ? buildTrendlineTradeLevels(direction, a1, a15, a5, trendlines["1H"])
+    : direction === "SELL"
+      ? buildTrendlineTradeLevels(direction, a1, a15, a5, trendlines["1H"])
+      : null;
+
+  if (direction !== "None" && !levels) {
+    status = "WAITING";
+    direction = "None";
+    score = 0;
+    reasons = ["Risk/reward or logical SL/target conditions not acceptable"];
+    warnings = ["No valid trendline trade levels"];
+  }
+
+  const signal = {
+    status,
+    direction,
+    score,
+    maxScore: 10,
+    confirmationGrade:
+      score >= 9 ? "STRONG" : score >= 7 ? "CONFIRMED" : score >= 5 ? "WATCH" : "NONE",
+    reasons,
+    warnings,
+    retest: direction === "BUY"
+      ? trendlines["1H"].bullish.retest
+      : direction === "SELL"
+        ? trendlines["1H"].bearish.retest
+        : null,
+    noRetestPath:
+      direction === "BUY"
+        ? bullishScoreData.continuation && !trendlines["1H"].bullish.retest?.held
+        : direction === "SELL"
+          ? bearishScoreData.continuation && !trendlines["1H"].bearish.retest?.held
+          : false
+  };
+
+  return {
+    success: true,
+    instrument: OUTPUT_SYMBOL,
+    generatedAt: new Date().toISOString(),
+    currentPrice: a5.currentPrice,
+    TRENDLINE_SIGNAL: signal,
+    TRENDLINE_SCORE: {
+      BUY: bullishScoreData,
+      SELL: bearishScoreData
+    },
+    TRENDLINES: trendlines,
+    TRADE_LEVELS: levels,
+    analysis: {
+      "1H": a1,
+      "15M": a15,
+      "5M": a5
+    }
+  };
+}
+
+function buildTrendlineTelegramMessage(result) {
+  const signal = result.TRENDLINE_SIGNAL || {};
+  const levels = result.TRADE_LEVELS || {};
+
+  let message =
+    `XAUUSD TRENDLINE ALERT\n\n` +
+    `Status: ${signal.status || "WAITING"}\n` +
+    `Direction: ${signal.direction || "None"}\n` +
+    `Score: ${signal.score ?? 0}/${signal.maxScore ?? 10}\n` +
+    `Grade: ${signal.confirmationGrade || "NONE"}\n` +
+    `Price: ${result.currentPrice ?? "N/A"}\n\n` +
+    `1H Trendline: ${result.TRENDLINES?.["1H"]?.bullish?.confirmed ? "Bullish Breakout" : result.TRENDLINES?.["1H"]?.bearish?.confirmed ? "Bearish Breakdown" : "No Confirmed Break"}\n` +
+    `15M: ${result.TRENDLINES?.["15M"]?.bullish?.confirmed ? "Bullish Confirm" : result.TRENDLINES?.["15M"]?.bearish?.confirmed ? "Bearish Confirm" : "No Confirmed Break"}\n` +
+    `5M: ${result.TRENDLINES?.["5M"]?.bullish?.confirmed ? "Bullish Trigger" : result.TRENDLINES?.["5M"]?.bearish?.confirmed ? "Bearish Trigger" : "Continuation/No Retest"}\n` +
+    `Retest: ${signal.retest?.held ? "YES - HELD" : signal.noRetestPath ? "NO - Strong Continuation" : "NO"}\n`;
+
+  if (levels?.entry) {
+    message +=
+      `\nTRADE LEVELS\n` +
+      `Entry: ${levels.entry}\n` +
+      `SL: ${levels.stopLoss}\n` +
+      `TP1: ${levels.takeProfit?.TP1 ?? "N/A"}\n` +
+      `TP2: ${levels.takeProfit?.TP2 ?? "N/A"}\n` +
+      `TP3: ${levels.takeProfit?.TP3 ?? "N/A"}\n` +
+      `Target: ${levels.targetMethod || "Trendline / Structure"}\n`;
+  }
+
+  if (signal.reasons?.length) {
+    message +=
+      `\nCONFIRMATIONS\n` +
+      signal.reasons.slice(0, 8).map(x => `â€¢ ${x}`).join("\n") +
+      "\n";
+  }
+
+  if (signal.warnings?.length) {
+    message +=
+      `\nWARNINGS\n` +
+      signal.warnings.slice(0, 6).map(x => `â€¢ ${x}`).join("\n") +
+      "\n";
+  }
+
+  return message;
+}
+
+function trendlineAlertKey(result) {
+  const signal = result.TRENDLINE_SIGNAL || {};
+  if (!signal.direction || signal.direction === "None") return null;
+  const tl = result.TRENDLINES?.["1H"]?.[signal.direction === "BUY" ? "bullish" : "bearish"];
+  return `${signal.direction}:${tl?.breakoutIndex ?? "na"}:${tl?.breakoutPrice ?? "na"}`;
+}
+
+/* =========================================================
    ENTRY CONFIRMATION
 ========================================================= */
 
@@ -2321,298 +3079,274 @@ function entryConfirmation(
   const bearishReasons = [];
 
   const bullishStructureBreak =
-    a5.breakDirection === "Bullish";
+    a5.breakDirection ===
+    "Bullish";
 
   const bearishStructureBreak =
-    a5.breakDirection === "Bearish";
+    a5.breakDirection ===
+    "Bearish";
 
   const bullishTechnical =
     a5.indicators?.RSI14 > 50 &&
-    a5.indicators?.MACD?.bias === "Bullish";
+    a5.indicators?.MACD?.bias ===
+      "Bullish";
 
   const bearishTechnical =
     a5.indicators?.RSI14 < 50 &&
-    a5.indicators?.MACD?.bias === "Bearish";
+    a5.indicators?.MACD?.bias ===
+      "Bearish";
 
   const bullishHTF =
-    a1.structure.structure !== "Bearish Structure";
+    a1.structure.structure !==
+    "Bearish Structure";
 
   const bearishHTF =
-    a1.structure.structure !== "Bullish Structure";
+    a1.structure.structure !==
+    "Bullish Structure";
 
-  const bullish5MStructure =
-    a5.structure?.structure === "Bullish Structure";
-
-  const bearish5MStructure =
-    a5.structure?.structure === "Bearish Structure";
-
-  const bullish15MStructure =
-    a15.structure?.structure === "Bullish Structure";
-
-  const bearish15MStructure =
-    a15.structure?.structure === "Bearish Structure";
-
-  const bullishLiquidity =
-    a5.liquidity?.latestSweep === "Bullish Liquidity Sweep";
-
-  const bearishLiquidity =
-    a5.liquidity?.latestSweep === "Bearish Liquidity Sweep";
-
-  const bullishCandle =
-    a5.candle?.direction === "Bullish" &&
-    (
-      a5.candle?.strength === "Strong" ||
-      a5.candle?.patterns?.includes("Bullish Engulfing") ||
-      a5.candle?.patterns?.includes("Bullish Rejection")
-    );
-
-  const bearishCandle =
-    a5.candle?.direction === "Bearish" &&
-    (
-      a5.candle?.strength === "Strong" ||
-      a5.candle?.patterns?.includes("Bearish Engulfing") ||
-      a5.candle?.patterns?.includes("Bearish Rejection")
-    );
-
-  if (a1.structure.structure === "Bullish Structure") {
+  if (
+    a1.structure.structure ===
+    "Bullish Structure"
+  ) {
     bullishScore += 2;
-    bullishReasons.push("1H bullish structure");
+    bullishReasons.push(
+      "1H bullish structure"
+    );
   }
 
-  if (bullish15MStructure) {
+  if (
+    a15.structure.structure ===
+    "Bullish Structure"
+  ) {
     bullishScore += 1;
-    bullishReasons.push("15M bullish structure");
+    bullishReasons.push(
+      "15M bullish structure"
+    );
   }
 
-  if (a15.breakDirection === "Bullish") {
+  if (
+    a15.breakDirection ===
+    "Bullish"
+  ) {
     bullishScore += 2;
-    bullishReasons.push("15M bullish structure confirmation");
+    bullishReasons.push(
+      "15M bullish structure confirmation"
+    );
   }
 
-  if (bullishStructureBreak) {
+  if (
+    bullishStructureBreak
+  ) {
     bullishScore += 3;
-    bullishReasons.push("5M bullish break");
+    bullishReasons.push(
+      "5M bullish break"
+    );
   }
 
-  if (bullish5MStructure) {
+  if (
+    a5.indicators?.RSI14 >
+    50
+  ) {
+    bullishScore += 1;
+    bullishReasons.push(
+      "RSI above 50"
+    );
+  }
+
+  if (
+    a5.indicators?.MACD?.bias ===
+    "Bullish"
+  ) {
+    bullishScore += 1;
+    bullishReasons.push(
+      "MACD bullish"
+    );
+  }
+
+  if (
+    a5.liquidity?.latestSweep ===
+    "Bullish Liquidity Sweep"
+  ) {
     bullishScore += 2;
-    bullishReasons.push("5M bullish structure");
+    bullishReasons.push(
+      "Bullish liquidity sweep"
+    );
   }
 
-  if (a5.indicators?.RSI14 > 50) {
+  if (
+    a5.candle?.direction ===
+      "Bullish" &&
+    (
+      a5.candle?.strength ===
+        "Strong" ||
+      a5.candle?.patterns?.includes(
+        "Bullish Engulfing"
+      ) ||
+      a5.candle?.patterns?.includes(
+        "Bullish Rejection"
+      )
+    )
+  ) {
     bullishScore += 1;
-    bullishReasons.push("RSI above 50");
+    bullishReasons.push(
+      "Bullish candle confirmation"
+    );
   }
 
-  if (a5.indicators?.MACD?.bias === "Bullish") {
-    bullishScore += 1;
-    bullishReasons.push("MACD bullish");
-  }
-
-  if (bullishLiquidity) {
-    bullishScore += 2;
-    bullishReasons.push("Bullish liquidity sweep");
-  }
-
-  if (bullishCandle) {
-    bullishScore += 1;
-    bullishReasons.push("Bullish candle confirmation");
-  }
-
-  if (a1.structure.structure === "Bearish Structure") {
+  if (
+    a1.structure.structure ===
+    "Bearish Structure"
+  ) {
     bearishScore += 2;
-    bearishReasons.push("1H bearish structure");
+    bearishReasons.push(
+      "1H bearish structure"
+    );
   }
 
-  if (bearish15MStructure) {
+  if (
+    a15.structure.structure ===
+    "Bearish Structure"
+  ) {
     bearishScore += 1;
-    bearishReasons.push("15M bearish structure");
+    bearishReasons.push(
+      "15M bearish structure"
+    );
   }
 
-  if (a15.breakDirection === "Bearish") {
+  if (
+    a15.breakDirection ===
+    "Bearish"
+  ) {
     bearishScore += 2;
-    bearishReasons.push("15M bearish structure confirmation");
+    bearishReasons.push(
+      "15M bearish structure confirmation"
+    );
   }
 
-  if (bearishStructureBreak) {
+  if (
+    bearishStructureBreak
+  ) {
     bearishScore += 3;
-    bearishReasons.push("5M bearish break");
+    bearishReasons.push(
+      "5M bearish break"
+    );
   }
 
-  if (bearish5MStructure) {
+  if (
+    a5.indicators?.RSI14 <
+    50
+  ) {
+    bearishScore += 1;
+    bearishReasons.push(
+      "RSI below 50"
+    );
+  }
+
+  if (
+    a5.indicators?.MACD?.bias ===
+    "Bearish"
+  ) {
+    bearishScore += 1;
+    bearishReasons.push(
+      "MACD bearish"
+    );
+  }
+
+  if (
+    a5.liquidity?.latestSweep ===
+    "Bearish Liquidity Sweep"
+  ) {
     bearishScore += 2;
-    bearishReasons.push("5M bearish structure");
+    bearishReasons.push(
+      "Bearish liquidity sweep"
+    );
   }
 
-  if (a5.indicators?.RSI14 < 50) {
+  if (
+    a5.candle?.direction ===
+      "Bearish" &&
+    (
+      a5.candle?.strength ===
+        "Strong" ||
+      a5.candle?.patterns?.includes(
+        "Bearish Engulfing"
+      ) ||
+      a5.candle?.patterns?.includes(
+        "Bearish Rejection"
+      )
+    )
+  ) {
     bearishScore += 1;
-    bearishReasons.push("RSI below 50");
+    bearishReasons.push(
+      "Bearish candle confirmation"
+    );
   }
 
-  if (a5.indicators?.MACD?.bias === "Bearish") {
-    bearishScore += 1;
-    bearishReasons.push("MACD bearish");
-  }
-
-  if (bearishLiquidity) {
-    bearishScore += 2;
-    bearishReasons.push("Bearish liquidity sweep");
-  }
-
-  if (bearishCandle) {
-    bearishScore += 1;
-    bearishReasons.push("Bearish candle confirmation");
-  }
-
-  /*
-     A+ confirmation remains strict:
-     5M structure break + technical confirmation + HTF alignment.
-  */
-  const bullishAPlus =
+  const bullishConfirmed =
     bullishStructureBreak &&
     bullishTechnical &&
     bullishHTF &&
     bullishScore >= 7 &&
-    bullishScore > bearishScore + 2;
+    bullishScore >
+      bearishScore + 2;
 
-  const bearishAPlus =
+  const bearishConfirmed =
     bearishStructureBreak &&
     bearishTechnical &&
     bearishHTF &&
     bearishScore >= 7 &&
-    bearishScore > bullishScore + 2;
+    bearishScore >
+      bullishScore + 2;
 
-  /*
-     A-grade intraday confirmation:
-     A 5M BOS is NOT mandatory, but the setup must have
-     5M structure + technical alignment + HTF support and
-     multiple independent confirmations.
+  let status =
+    "WAITING";
 
-     Opposite liquidity/retest confirmation blocks the trade.
-     This prevents a simple score increase from creating
-     false BUY/SELL entries.
-  */
-  const bullishRetestConfirmed =
-    retest?.bullishRetestConfirmed === true;
+  let direction =
+    "None";
 
-  const bearishRetestConfirmed =
-    retest?.bearishRetestConfirmed === true;
+  if (
+    bullishConfirmed
+  ) {
+    status =
+      "BUY CONFIRMED";
 
-  const bullishRetestSafe =
-    !bearishRetestConfirmed;
+    direction =
+      "BUY";
+  } else if (
+    bearishConfirmed
+  ) {
+    status =
+      "SELL CONFIRMED";
 
-  const bearishRetestSafe =
-    !bullishRetestConfirmed;
-
-  const bullishAConfirmations = [
-    bullish5MStructure,
-    bullish15MStructure,
-    a15.breakDirection === "Bullish",
-    bullishLiquidity,
-    bullishCandle,
-    bullishRetestConfirmed,
-    a5.indicators?.MACD?.bias === "Bullish",
-    a5.indicators?.RSI14 > 50
-  ].filter(Boolean);
-
-  const bearishAConfirmations = [
-    bearish5MStructure,
-    bearish15MStructure,
-    a15.breakDirection === "Bearish",
-    bearishLiquidity,
-    bearishCandle,
-    bearishRetestConfirmed,
-    a5.indicators?.MACD?.bias === "Bearish",
-    a5.indicators?.RSI14 < 50
-  ].filter(Boolean);
-
-  const bullishAGrade =
-    !bullishStructureBreak &&
-    !bearishStructureBreak &&
-    bullish5MStructure &&
-    bullishTechnical &&
-    bullishHTF &&
-    bullishRetestSafe &&
-    !bearishLiquidity &&
-    bullishScore >= 6 &&
-    bullishScore > bearishScore + 2 &&
-    bullishAConfirmations.length >= 4;
-
-  const bearishAGrade =
-    !bullishStructureBreak &&
-    !bearishStructureBreak &&
-    bearish5MStructure &&
-    bearishTechnical &&
-    bearishHTF &&
-    bearishRetestSafe &&
-    !bullishLiquidity &&
-    bearishScore >= 6 &&
-    bearishScore > bullishScore + 2 &&
-    bearishAConfirmations.length >= 4;
-
-  let status = "WAITING";
-  let direction = "None";
-  let confirmationGrade = "NONE";
-  let potentialSetup = false;
-
-  if (bullishAPlus) {
-    status = "BUY CONFIRMED";
-    direction = "BUY";
-    confirmationGrade = "A+";
-  } else if (bearishAPlus) {
-    status = "SELL CONFIRMED";
-    direction = "SELL";
-    confirmationGrade = "A+";
-  } else if (bullishAGrade) {
-    status = "BUY CONFIRMED";
-    direction = "BUY";
-    confirmationGrade = "A";
-  } else if (bearishAGrade) {
-    status = "SELL CONFIRMED";
-    direction = "SELL";
-    confirmationGrade = "A";
-  } else {
-    potentialSetup =
-      (bullish5MStructure && bullishTechnical && bullishHTF) ||
-      (bearish5MStructure && bearishTechnical && bearishHTF);
-  }
-
-  let rejectionReason = null;
-
-  if (status === "WAITING") {
-    if (bullish5MStructure && bullishTechnical && bullishHTF && bearishLiquidity) {
-      rejectionReason = "Bullish setup blocked by bearish liquidity sweep.";
-    } else if (bearish5MStructure && bearishTechnical && bearishHTF && bullishLiquidity) {
-      rejectionReason = "Bearish setup blocked by bullish liquidity sweep.";
-    } else if (bullishRetestConfirmed && bearishRetestConfirmed) {
-      rejectionReason = "Both directional retests are active; confirmation is conflicting.";
-    } else if (bullish5MStructure && bullishTechnical && bullishHTF && bearishRetestConfirmed) {
-      rejectionReason = "Bullish setup blocked by confirmed bearish retest.";
-    } else if (bearish5MStructure && bearishTechnical && bearishHTF && bullishRetestConfirmed) {
-      rejectionReason = "Bearish setup blocked by confirmed bullish retest.";
-    } else if (!bullishStructureBreak && !bearishStructureBreak) {
-      rejectionReason = "Waiting for A-grade intraday confirmation or A+ 5M structure break.";
-    }
+    direction =
+      "SELL";
   }
 
   return {
     status,
+
     direction,
-    confirmationGrade,
-    potentialSetup,
+
     bullishScore,
+
     bearishScore,
+
     bullishReasons,
+
     bearishReasons,
+
     bullishTechnical,
+
     bearishTechnical,
+
     bullishHTF,
+
     bearishHTF,
+
     bullishStructureBreak,
+
     bearishStructureBreak,
-    bullishPriceActionConfirmations: bullishAConfirmations,
-    bearishPriceActionConfirmations: bearishAConfirmations,
-    rejectionReason,
+
     retest
   };
 }
@@ -3013,6 +3747,13 @@ async function mtfAnalysis() {
     TRADE_LEVELS:
       levels,
 
+    TRENDLINE_ANALYSIS:
+      await trendlineAnalysis(
+        candles1H,
+        candles15M,
+        candles5M
+      ),
+
     INVALIDATION:
       invalidation(
         a1,
@@ -3064,51 +3805,32 @@ async function openRouterAnalysis(mtf) {
     };
   }
 
-  const entry = mtf.ENTRY_CONFIRMATION || {};
-  const a1 = mtf.analysis?.["1H"] || {};
-  const a15 = mtf.analysis?.["15M"] || {};
-  const a5 = mtf.analysis?.["5M"] || {};
+  const prompt = `
+You are a financial market analysis assistant.
 
-  const compactData = {
-    price: entry.currentPrice ?? mtf.importantLevels?.currentPrice,
-    mtf: mtf.MTF,
-    structure: mtf.MTF_STRUCTURE,
-    confirmation: {
-      status: entry.status,
-      direction: entry.direction,
-      grade: entry.confirmationGrade,
-      bullishScore: entry.bullishScore,
-      bearishScore: entry.bearishScore,
-      bullishReasons: entry.bullishReasons?.slice(0, 6),
-      bearishReasons: entry.bearishReasons?.slice(0, 6),
-      bullishPA: entry.bullishPriceActionConfirmations?.slice(0, 6),
-      bearishPA: entry.bearishPriceActionConfirmations?.slice(0, 6),
-      rejection: entry.rejectionReason
-    },
-    structureBreaks: {
-      "1H": { BOS: a1.BOS, CHoCH: a1.CHoCH, MSS: a1.MSS },
-      "15M": { BOS: a15.BOS, CHoCH: a15.CHoCH, MSS: a15.MSS },
-      "5M": { BOS: a5.BOS, CHoCH: a5.CHoCH, MSS: a5.MSS }
-    },
-    technical: {
-      "1H": { trend: a1.trend, RSI: a1.indicators?.RSI14, MACD: a1.indicators?.MACD?.bias },
-      "15M": { trend: a15.trend, RSI: a15.indicators?.RSI14, MACD: a15.indicators?.MACD?.bias },
-      "5M": { trend: a5.trend, RSI: a5.indicators?.RSI14, MACD: a5.indicators?.MACD?.bias }
-    },
-    liquidity: { "5M": a5.liquidity?.latestSweep },
-    candle: { "5M": a5.candle },
-    retest: mtf.RETEST,
-    invalidation: mtf.INVALIDATION,
-    levels: mtf.importantLevels
-  };
+Analyze XAUUSD using ONLY the supplied technical engine output.
+Do not invent price data.
 
-  const prompt = `Analyze XAUUSD using ONLY this engine output.
+Explain:
+1. 1H bias
+2. 15M bias
+3. 5M bias
+4. Market structure
+5. BOS / CHoCH / MSS
+6. Liquidity
+7. FVG
+8. Order blocks
+9. Retest
+10. Entry confirmation
+11. Invalidation
+12. Why the engine is BUY, SELL or WAITING
 
-Return a concise technical explanation covering MTF bias, structure, BOS/CHoCH/MSS, liquidity, price action, retest, entry confirmation and invalidation.
-Respect the engine decision. If status is WAITING, say WAITING. Do not invent data or guarantee profit.
+If confirmation is insufficient, explicitly say WAITING.
+Do not claim certainty or guaranteed profit.
 
-ENGINE:
-${JSON.stringify(compactData)}`;
+DATA:
+${JSON.stringify(mtf, null, 2)}
+`;
 
   try {
     const response = await fetch(
@@ -3123,10 +3845,18 @@ ${JSON.stringify(compactData)}`;
         },
         body: JSON.stringify({
           model: OPENROUTER_MODEL,
-          models: [OPENROUTER_MODEL, OPENROUTER_FALLBACK_MODEL],
-          messages: [{ role: "user", content: prompt }],
+          models: [
+            OPENROUTER_MODEL,
+            OPENROUTER_FALLBACK_MODEL
+          ],
+          messages: [
+            {
+              role: "user",
+              content: prompt
+            }
+          ],
           temperature: 0.2,
-          max_tokens: 750
+          max_tokens: 3000
         })
       }
     );
@@ -3141,7 +3871,9 @@ ${JSON.stringify(compactData)}`;
       };
     }
 
-    const text = json.choices?.[0]?.message?.content || "";
+    const text =
+      json.choices?.[0]?.message?.content ||
+      "";
 
     if (!text) {
       return {
@@ -3863,6 +4595,40 @@ app.get(
 );
 
 /* =========================================================
+   TRENDLINE ANALYSIS
+========================================================= */
+
+app.get(
+  "/trendline-analysis",
+  async (req, res) => {
+    try {
+      const [
+        candles1H,
+        candles15M,
+        candles5M
+      ] = await Promise.all([
+        getCandles(TF["1H"], 350),
+        getCandles(TF["15M"], 350),
+        getCandles(TF["5M"], 350)
+      ]);
+
+      const result = trendlineAnalysis(
+        candles1H,
+        candles15M,
+        candles5M
+      );
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+/* =========================================================
    FULL ANALYSIS + CONFIRMED TELEGRAM
 ========================================================= */
 
@@ -3898,6 +4664,48 @@ app.get(
           );
       }
 
+      let trendlineTelegram = null;
+      const trendlineResult =
+        mtf.TRENDLINE_ANALYSIS;
+      const trendlineSignal =
+        trendlineResult?.TRENDLINE_SIGNAL;
+
+      if (
+        trendlineSignal?.direction &&
+        trendlineSignal.direction !== "None" &&
+        trendlineSignal.score >= 7
+      ) {
+        const key = trendlineAlertKey(
+          trendlineResult
+        );
+
+        if (
+          key &&
+          TRENDLINE_ALERT_STATE.get(
+            "XAUUSD"
+          ) !== key
+        ) {
+          trendlineTelegram =
+            await sendTelegramMessage(
+              buildTrendlineTelegramMessage(
+                trendlineResult
+              )
+            );
+
+          if (trendlineTelegram?.sent) {
+            TRENDLINE_ALERT_STATE.set(
+              "XAUUSD",
+              key
+            );
+          }
+        } else {
+          trendlineTelegram = {
+            sent: false,
+            reason: "Duplicate Trendline signal suppressed"
+          };
+        }
+      }
+
       res.json({
         ...mtf,
 
@@ -3905,7 +4713,10 @@ app.get(
           ai,
 
         TELEGRAM:
-          telegram
+          telegram,
+
+        TRENDLINE_TELEGRAM:
+          trendlineTelegram
       });
     } catch (
       error
