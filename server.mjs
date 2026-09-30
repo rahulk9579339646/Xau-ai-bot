@@ -2674,6 +2674,11 @@ function trendlineScoreForDirection(
     warnings.push("15M breakout is weak");
   }
 
+  const oppositeFiveTrendline = isBullish ? t5.bearish : t5.bullish;
+  const oppositeFiveConfirmed =
+    !!oppositeFiveTrendline?.confirmed &&
+    oppositeFiveTrendline?.strength !== "Weak";
+
   const fiveStructure = isBullish
     ? (
         t5.analysis.structure.structure === "Bullish Structure" ||
@@ -2696,7 +2701,9 @@ function trendlineScoreForDirection(
         t5.analysis.indicators?.MACD?.bias === "Bearish"
       );
 
-  if (fiveStructure && fiveMomentum) {
+  if (oppositeFiveConfirmed) {
+    warnings.push("Opposite 5M trendline confirmation detected");
+  } else if (fiveStructure && fiveMomentum) {
     score += 2;
     reasons.push("5M entry direction confirmed");
   } else if (fiveStructure) {
