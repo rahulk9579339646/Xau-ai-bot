@@ -2826,17 +2826,12 @@ function trendlineScoreForDirection(
   };
 }
 
-function buildTrendlineTradeLevels(direction, a1, a15, a5, trendlineData) {
-  const currentPrice = num(a5.currentPrice);
-  const atrValue = num(a5.indicators?.ATR14);
+function buildTrendlineTradeLevels(direction, a1, a15, a5, trendlineData, tradeTimeframe = "5M") {
+  const analysis = tradeTimeframe === "1H" ? a1 : tradeTimeframe === "15M" ? a15 : a5;
+  const currentPrice = num(analysis?.currentPrice);
+  const atrValue = num(analysis?.indicators?.ATR14);
 
-  if (
-    !Number.isFinite(currentPrice) ||
-    !Number.isFinite(atrValue) ||
-    atrValue <= 0
-  ) {
-    return null;
-  }
+  if (!Number.isFinite(currentPrice) || !Number.isFinite(atrValue) || atrValue <= 0) return null;
 
   const isBuy = direction === "BUY";
   const isSell = direction === "SELL";
@@ -2845,319 +2840,177 @@ function buildTrendlineTradeLevels(direction, a1, a15, a5, trendlineData) {
   const t = isBuy ? trendlineData?.bullish : trendlineData?.bearish;
   if (!t?.confirmed || t.strength === "Weak") return null;
 
-  const s5 = a5.structure || {};
+  const s = analysis.structure || {};
+  const swingLow = num(s.latestSwingLow?.price);
+  const swingHigh = num(s.latestSwingHigh?.price);
+  const s1 = a1.structure || {};
   const s15 = a15.structure || {};
+  const s5 = a5.structure || {};
 
-  const swingLow5 = num(s5.latestSwingLow?.price);
-  const swingHigh5 = num(s5.latestSwingHigh?.price);
-  const swingLow15 = num(s15.latestSwingLow?.price);
-  const swingHigh15 = num(s15.latestSwingHigh?.price);
+  const ob = isBuy
+    ? num(analysis.orderBlocks?.bullish?.[0]?.low ?? analysis.orderBlocks?.bullish?.[0]?.priceLow)
+    : num(analysis.orderBlocks?.bearish?.[0]?.high ?? analysis.orderBlocks?.bearish?.[0]?.priceHigh);
 
-  const ob5 = isBuy
-    ? num(a5.orderBlocks?.bullish?.[0]?.low ?? a5.orderBlocks?.bullish?.[0]?.priceLow)
-    : num(a5.orderBlocks?.bearish?.[0]?.high ?? a5.orderBlocks?.bearish?.[0]?.priceHigh);
-
-  const sd5 = isBuy
-    ? num(a5.supplyDemand?.demand?.[0]?.low ?? a5.supplyDemand?.demand?.[0]?.priceLow)
-    : num(a5.supplyDemand?.supply?.[0]?.high ?? a5.supplyDemand?.supply?.[0]?.priceHigh);
+  const sd = isBuy
+    ? num(analysis.supplyDemand?.demand?.[0]?.low ?? analysis.supplyDemand?.demand?.[0]?.priceLow)
+    : num(analysis.supplyDemand?.supply?.[0]?.high ?? analysis.supplyDemand?.supply?.[0]?.priceHigh);
 
   const retestLine = num(t?.retest?.line);
   const trendlineLine = num(t?.trendline?.currentLine);
   const breakoutPrice = num(t?.breakoutPrice);
-
   const noiseBuffer = Math.max(atrValue * 0.08, 0.05);
   const minimumRisk = atrValue * 0.25;
   const maximumRisk = atrValue * 1.50;
 
+  const lowerLows = [num(s5.latestSwingLow?.price), num(s15.latestSwingLow?.price), num(s1.latestSwingLow?.price)].filter(Number.isFinite);
+  const lowerHighs = [num(s5.latestSwingHigh?.price), num(s15.latestSwingHigh?.price), num(s1.latestSwingHigh?.price)].filter(Number.isFinite);
+
   const rawStops = isBuy
-    ? [swingLow5, ob5, sd5, swingLow15, retestLine, trendlineLine, breakoutPrice]
-        .filter(Number.isFinite)
-        .filter(x => x < currentPrice)
-        .sort((a, b) => b - a)
-    : [swingHigh5, ob5, sd5, swingHigh15, retestLine, trendlineLine, breakoutPrice]
-        .filter(Number.isFinite)
-        .filter(x => x > currentPrice)
-        .sort((a, b) => a - b);
+    ? [swingLow, ob, sd, ...lowerLows, retestLine, trendlineLine, breakoutPrice].filter(Number.isFinite).filter(x => x < currentPrice).sort((a,b)=>b-a)
+    : [swingHigh, ob, sd, ...lowerHighs, retestLine, trendlineLine, breakoutPrice].filter(Number.isFinite).filter(x => x > currentPrice).sort((a,b)=>a-b);
 
   let stopLoss = null;
-
   for (const base of rawStops) {
-    const candidate = isBuy
-      ? base - noiseBuffer
-      : base + noiseBuffer;
-
+    const candidate = isBuy ? base - noiseBuffer : base + noiseBuffer;
     const risk = Math.abs(currentPrice - candidate);
-
-    if (risk >= minimumRisk && risk <= maximumRisk) {
-      stopLoss = candidate;
-      break;
-    }
+    if (risk >= minimumRisk && risk <= maximumRisk) { stopLoss = candidate; break; }
   }
 
   if (!Number.isFinite(stopLoss)) {
-    const fallbackRisk = Math.min(
-      maximumRisk,
-      Math.max(minimumRisk, atrValue * 0.50)
-    );
-
-    stopLoss = isBuy
-      ? currentPrice - fallbackRisk
-      : currentPrice + fallbackRisk;
+    const fallbackRisk = Math.min(maximumRisk, Math.max(minimumRisk, atrValue * 0.50));
+    stopLoss = isBuy ? currentPrice - fallbackRisk : currentPrice + fallbackRisk;
   }
 
   const risk = Math.abs(currentPrice - stopLoss);
-
-  if (
-    !Number.isFinite(risk) ||
-    risk < minimumRisk ||
-    risk > maximumRisk
-  ) {
-    return null;
-  }
+  if (!Number.isFinite(risk) || risk < minimumRisk || risk > maximumRisk) return null;
 
   const supportLevels = [
-    num(a5.supportResistance?.support),
-    num(a5.supportResistance?.nextSupport),
-    swingLow5,
-    swingLow15,
-    num(a15.supportResistance?.support),
-    num(a15.supportResistance?.nextSupport),
-    num(a1.supportResistance?.support),
-    num(a1.supportResistance?.nextSupport)
+    num(analysis.supportResistance?.support), num(analysis.supportResistance?.nextSupport), swingLow,
+    num(a5.supportResistance?.support), num(a5.supportResistance?.nextSupport),
+    num(a15.supportResistance?.support), num(a15.supportResistance?.nextSupport),
+    num(a1.supportResistance?.support), num(a1.supportResistance?.nextSupport)
   ];
-
   const resistanceLevels = [
-    num(a5.supportResistance?.resistance),
-    num(a5.supportResistance?.nextResistance),
-    swingHigh5,
-    swingHigh15,
-    num(a15.supportResistance?.resistance),
-    num(a15.supportResistance?.nextResistance),
-    num(a1.supportResistance?.resistance),
-    num(a1.supportResistance?.nextResistance)
+    num(analysis.supportResistance?.resistance), num(analysis.supportResistance?.nextResistance), swingHigh,
+    num(a5.supportResistance?.resistance), num(a5.supportResistance?.nextResistance),
+    num(a15.supportResistance?.resistance), num(a15.supportResistance?.nextResistance),
+    num(a1.supportResistance?.resistance), num(a1.supportResistance?.nextResistance)
   ];
 
   const projection = num(t.targetProjection);
-
-  const targetPool = [
-    ...(isBuy ? resistanceLevels : supportLevels),
-    projection
-  ]
-    .filter(Number.isFinite)
-    .filter(x => isBuy ? x > currentPrice : x < currentPrice)
-    .sort((a, b) => isBuy ? a - b : b - a);
+  const targetPool = [...(isBuy ? resistanceLevels : supportLevels), projection]
+    .filter(Number.isFinite).filter(x => isBuy ? x > currentPrice : x < currentPrice).sort((a,b)=>isBuy ? a-b : b-a);
 
   const minRR = 1.20;
   const dedupeGap = Math.max(atrValue * 0.05, 0.05);
   const targets = [];
-
   for (const target of targetPool) {
-    const rr = Math.abs(target - currentPrice) / risk;
-
+    const rr = Math.abs(target-currentPrice)/risk;
     if (rr < minRR) continue;
-    if (targets.some(x => Math.abs(x - target) < dedupeGap)) continue;
-
+    if (targets.some(x=>Math.abs(x-target)<dedupeGap)) continue;
     targets.push(target);
-    if (targets.length === 3) break;
+    if (targets.length===3) break;
+  }
+  if (!targets.length) return null;
+
+  for (const rr of [2.0,3.0]) {
+    if (targets.length>=3) break;
+    const target = isBuy ? currentPrice+risk*rr : currentPrice-risk*rr;
+    if (!targets.some(x=>Math.abs(x-target)<dedupeGap)) targets.push(target);
   }
 
-  // TP1 must come from a real structural/projection level.
-  // Do not manufacture a signal merely to fill TP2/TP3.
-  if (targets.length === 0) {
-    return null;
-  }
-
-  // Additional targets may use measured risk extensions only when
-  // the market has supplied fewer than three real levels.
-  for (const rr of [2.0, 3.0]) {
-    if (targets.length >= 3) break;
-
-    const target = isBuy
-      ? currentPrice + risk * rr
-      : currentPrice - risk * rr;
-
-    if (!targets.some(x => Math.abs(x - target) < dedupeGap)) {
-      targets.push(target);
-    }
-  }
-
-  const tp1 = targets[0] ?? null;
-  const tp2 = targets[1] ?? null;
-  const tp3 = targets[2] ?? null;
-  const rr1 = Number.isFinite(tp1)
-    ? Math.abs(tp1 - currentPrice) / risk
-    : null;
-
-  if (!Number.isFinite(rr1) || rr1 < minRR) return null;
+  const tp1=targets[0]??null, tp2=targets[1]??null, tp3=targets[2]??null;
+  const rr1=Number.isFinite(tp1)?Math.abs(tp1-currentPrice)/risk:null;
+  if (!Number.isFinite(rr1)||rr1<minRR) return null;
 
   return {
-    direction,
-    entry: round(currentPrice, 5),
-    stopLoss: round(stopLoss, 5),
-    risk: round(risk, 5),
-    takeProfit: {
-      TP1: round(tp1, 5),
-      TP2: Number.isFinite(tp2) ? round(tp2, 5) : null,
-      TP3: Number.isFinite(tp3) ? round(tp3, 5) : null
-    },
-    invalidation: round(stopLoss, 5),
-    targetMethod: "Real 5M/15M/1H structure + measured trendline projection; calculated extensions only when required",
-    trendlineProjection: Number.isFinite(projection) ? round(projection, 5) : null,
-    riskRewardTP1: round(rr1, 2)
+    timeframe: tradeTimeframe, direction, entry: round(currentPrice,5), stopLoss: round(stopLoss,5), risk: round(risk,5),
+    takeProfit:{TP1:round(tp1,5),TP2:Number.isFinite(tp2)?round(tp2,5):null,TP3:Number.isFinite(tp3)?round(tp3,5):null},
+    invalidation:round(stopLoss,5),
+    targetMethod:`Real ${tradeTimeframe}/MTF structure + trendline projection; measured extensions only when required`,
+    trendlineProjection:Number.isFinite(projection)?round(projection,5):null, riskRewardTP1:round(rr1,2)
   };
 }
 
+function buildIndependentTrendlineTradeSignal(direction, timeframe, analysis, trendlineData) {
+  const isBuy = direction === "BUY";
+  const trend = isBuy ? trendlineData?.bullish : trendlineData?.bearish;
+  if (!trend?.confirmed || trend.strength === "Weak") return null;
+
+  const label = timeframe;
+  const structureAligned = isBuy
+    ? (analysis?.structure?.structure === "Bullish Structure" || analysis?.breakDirection === "Bullish")
+    : (analysis?.structure?.structure === "Bearish Structure" || analysis?.breakDirection === "Bearish");
+  const momentumAligned = isBuy
+    ? (Number(analysis?.indicators?.RSI14) > 50 && analysis?.indicators?.MACD?.bias === "Bullish")
+    : (Number(analysis?.indicators?.RSI14) < 50 && analysis?.indicators?.MACD?.bias === "Bearish");
+  const candleAligned = isBuy ? analysis?.candle?.direction === "Bullish" : analysis?.candle?.direction === "Bearish";
+
+  let score=3; const reasons=[`${label} ${direction} trendline breakout confirmed`]; const warnings=[];
+  if (trend.strength === "Strong") { score+=2; reasons.push(`${label} breakout has strong displacement`); }
+  else { score+=1; reasons.push(`${label} breakout candle is valid`); }
+  if (structureAligned) { score+=2; reasons.push(`${label} ${direction} structure confirmation`); } else warnings.push(`${label} structure break is not fully confirmed`);
+  if (momentumAligned) { score+=2; reasons.push(`${label} ${direction} RSI + MACD momentum confirmation`); } else warnings.push(`${label} RSI/MACD momentum is not fully aligned`);
+  if (candleAligned) { score+=1; reasons.push(`${label} ${direction} candle confirmation`); }
+  if (trend.retest?.occurred && trend.retest?.held) { score+=1; reasons.push(`${label} breakout retest held`); }
+  else if (trend.continuation) reasons.push(`${label} continuation confirmed`);
+
+  return { ready: trend.confirmed && trend.strength!=="Weak" && structureAligned && momentumAligned && score>=7, direction, timeframe, score, maxScore:11, structureAligned, momentumAligned, candleAligned, reasons, warnings };
+}
+
+function build5MTrendlineTradeSignal(direction, a5, t5) {
+  return buildIndependentTrendlineTradeSignal(direction, "5M", a5, t5);
+}
+
 function trendlineAnalysis(candles1H, candles15M, candles5M) {
-  const a1 = analyzeTimeframe(candles1H, "1H");
-  const a15 = analyzeTimeframe(candles15M, "15M");
-  const a5 = analyzeTimeframe(candles5M, "5M");
-
-  const trendlines = {
-    "1H": {
-      bullish: findTrendlineBreakout(candles1H, "Bullish", 24),
-      bearish: findTrendlineBreakout(candles1H, "Bearish", 24)
-    },
-    "15M": {
-      bullish: findTrendlineBreakout(candles15M, "Bullish", 32),
-      bearish: findTrendlineBreakout(candles15M, "Bearish", 32)
-    },
-    "5M": {
-      bullish: findTrendlineBreakout(candles5M, "Bullish", 24),
-      bearish: findTrendlineBreakout(candles5M, "Bearish", 24)
-    }
+  const a1=analyzeTimeframe(candles1H,"1H"), a15=analyzeTimeframe(candles15M,"15M"), a5=analyzeTimeframe(candles5M,"5M");
+  const trendlines={
+    "1H":{bullish:findTrendlineBreakout(candles1H,"Bullish",24),bearish:findTrendlineBreakout(candles1H,"Bearish",24)},
+    "15M":{bullish:findTrendlineBreakout(candles15M,"Bullish",32),bearish:findTrendlineBreakout(candles15M,"Bearish",32)},
+    "5M":{bullish:findTrendlineBreakout(candles5M,"Bullish",24),bearish:findTrendlineBreakout(candles5M,"Bearish",24)}
   };
 
-  const bullish5 = trendlines["5M"].bullish;
-  const bearish5 = trendlines["5M"].bearish;
+  const bullishScoreData=trendlineScoreForDirection("BUY",trendlines["1H"],trendlines["15M"],trendlines["5M"],a1,a15,a5);
+  const bearishScoreData=trendlineScoreForDirection("SELL",trendlines["1H"],trendlines["15M"],trendlines["5M"],a1,a15,a5);
 
-  const bullishScoreData = trendlineScoreForDirection(
-    "BUY",
-    trendlines["1H"],
-    trendlines["15M"],
-    trendlines["5M"],
-    a1,
-    a15,
-    a5
-  );
-
-  const bearishScoreData = trendlineScoreForDirection(
-    "SELL",
-    trendlines["1H"],
-    trendlines["15M"],
-    trendlines["5M"],
-    a1,
-    a15,
-    a5
-  );
-
-  const bullishReady =
-    trendlines["1H"].bullish.confirmed &&
-    trendlines["1H"].bullish.strength !== "Weak" &&
-    bullishScoreData.mainTrendAligned &&
-    bullishScoreData.fifteenTrendAligned &&
-    (bullish5.confirmed || bullishScoreData.continuation) &&
-    !bullishScoreData.hardBlock;
-
-  const bearishReady =
-    trendlines["1H"].bearish.confirmed &&
-    trendlines["1H"].bearish.strength !== "Weak" &&
-    bearishScoreData.mainTrendAligned &&
-    bearishScoreData.fifteenTrendAligned &&
-    (bearish5.confirmed || bearishScoreData.continuation) &&
-    !bearishScoreData.hardBlock;
-
-  let status = "WAITING";
-  let direction = "None";
-  let score = Math.max(bullishScoreData.score, bearishScoreData.score);
-  let reasons = score === bullishScoreData.score
-    ? bullishScoreData.reasons
-    : bearishScoreData.reasons;
-  let warnings = score === bullishScoreData.score
-    ? bullishScoreData.warnings
-    : bearishScoreData.warnings;
-
-  if (
-    bullishReady &&
-    bullishScoreData.score >= 7 &&
-    !bullishScoreData.hardBlock &&
-    bullishScoreData.score > bearishScoreData.score
-  ) {
-    status = bullishScoreData.score >= 9
-      ? "BUY STRONG CONFIRMED"
-      : "BUY CONFIRMED";
-    direction = "BUY";
-    score = bullishScoreData.score;
-    reasons = bullishScoreData.reasons;
-    warnings = bullishScoreData.warnings;
-  } else if (
-    bearishReady &&
-    bearishScoreData.score >= 7 &&
-    !bearishScoreData.hardBlock &&
-    bearishScoreData.score > bullishScoreData.score
-  ) {
-    status = bearishScoreData.score >= 9
-      ? "SELL STRONG CONFIRMED"
-      : "SELL CONFIRMED";
-    direction = "SELL";
-    score = bearishScoreData.score;
-    reasons = bearishScoreData.reasons;
-    warnings = bearishScoreData.warnings;
+  const analyses={"1H":a1,"15M":a15,"5M":a5};
+  const independentSignals={};
+  const independentLevels={};
+  for (const tf of ["1H","15M","5M"]) {
+    independentSignals[tf]={};
+    independentLevels[tf]={};
+    for (const direction of ["BUY","SELL"]) {
+      const candidate=buildIndependentTrendlineTradeSignal(direction,tf,analyses[tf],trendlines[tf]);
+      independentSignals[tf][direction]=candidate;
+      independentLevels[tf][direction]=candidate?.ready ? buildTrendlineTradeLevels(direction,a1,a15,a5,trendlines[tf],tf) : null;
+      if (independentSignals[tf][direction]?.ready && !independentLevels[tf][direction]) independentSignals[tf][direction].ready=false;
+    }
   }
 
-  const levels = direction === "BUY"
-    ? buildTrendlineTradeLevels(direction, a1, a15, a5, trendlines["1H"])
-    : direction === "SELL"
-      ? buildTrendlineTradeLevels(direction, a1, a15, a5, trendlines["1H"])
-      : null;
-
-  if (direction !== "None" && !levels) {
-    status = "WAITING";
-    direction = "None";
-    score = 0;
-    reasons = ["Risk/reward or logical SL/target conditions not acceptable"];
-    warnings = ["No valid trendline trade levels"];
+  function select(tf) {
+    const b=independentSignals[tf].BUY, s=independentSignals[tf].SELL;
+    if (b?.ready && (!s?.ready || b.score>s.score)) return {signal:b,levels:independentLevels[tf].BUY,trend:trendlines[tf].bullish};
+    if (s?.ready && (!b?.ready || s.score>b.score)) return {signal:s,levels:independentLevels[tf].SELL,trend:trendlines[tf].bearish};
+    return {signal:null,levels:null,trend:null};
   }
 
-  const signal = {
-    status,
-    direction,
-    score,
-    maxScore: 10,
-    confirmationGrade:
-      score >= 9 ? "STRONG" : score >= 7 ? "CONFIRMED" : score >= 5 ? "WATCH" : "NONE",
-    reasons,
-    warnings,
-    retest: direction === "BUY"
-      ? trendlines["1H"].bullish.retest
-      : direction === "SELL"
-        ? trendlines["1H"].bearish.retest
-        : null,
-    noRetestPath:
-      direction === "BUY"
-        ? bullishScoreData.continuation && !trendlines["1H"].bullish.retest?.held
-        : direction === "SELL"
-          ? bearishScoreData.continuation && !trendlines["1H"].bearish.retest?.held
-          : false
-  };
+  const selected={"1H":select("1H"),"15M":select("15M"),"5M":select("5M")};
+  const primary=selected["5M"];
+  const signal=primary.signal ? {
+    status:primary.signal.direction+" "+(primary.signal.score>=9?"STRONG CONFIRMED":"CONFIRMED"), direction:primary.signal.direction, score:primary.signal.score, maxScore:11,
+    confirmationGrade:primary.signal.score>=9?"STRONG":primary.signal.score>=7?"CONFIRMED":primary.signal.score>=5?"WATCH":"NONE", signalTimeframe:"5M", independentTimeframeBreakouts:true,
+    reasons:primary.signal.reasons,warnings:primary.signal.warnings,retest:primary.trend?.retest??null,noRetestPath:!!(primary.trend?.continuation&&!primary.trend?.retest?.held),
+    higherTimeframeContext:{"1H":trendlines["1H"].bullish.confirmed?"Bullish Breakout":trendlines["1H"].bearish.confirmed?"Bearish Breakdown":"No Confirmed Break","15M":trendlines["15M"].bullish.confirmed?"Bullish Breakout":trendlines["15M"].bearish.confirmed?"Bearish Breakdown":"No Confirmed Break"}
+  } : {status:"WAITING",direction:"None",score:Math.max(...["1H","15M","5M"].flatMap(tf=>[independentSignals[tf].BUY?.score??0,independentSignals[tf].SELL?.score??0])),maxScore:11,confirmationGrade:"NONE",signalTimeframe:"5M",independentTimeframeBreakouts:true,reasons:["Waiting for independent timeframe trade setup"],warnings:[]};
 
-  return {
-    success: true,
-    instrument: OUTPUT_SYMBOL,
-    generatedAt: new Date().toISOString(),
-    currentPrice: a5.currentPrice,
-    TRENDLINE_SIGNAL: signal,
-    TRENDLINE_SCORE: {
-      BUY: bullishScoreData,
-      SELL: bearishScoreData
+  return {success:true,instrument:OUTPUT_SYMBOL,generatedAt:new Date().toISOString(),currentPrice:a5.currentPrice,TRENDLINE_SIGNAL:signal,TRENDLINE_SCORE:{BUY:{...bullishScoreData,independentTimeframeSignals:independentSignals},SELL:{...bearishScoreData,independentTimeframeSignals:independentSignals}},TRENDLINES:trendlines,
+    TRADE_LEVELS:primary.levels,
+    INDEPENDENT_TRADE_SIGNALS:{
+      "1H":{signal:selected["1H"].signal,levels:selected["1H"].levels},
+      "15M":{signal:selected["15M"].signal,levels:selected["15M"].levels},
+      "5M":{signal:selected["5M"].signal,levels:selected["5M"].levels}
     },
-    TRENDLINES: trendlines,
-    TRADE_LEVELS: levels,
-    analysis: {
-      "1H": a1,
-      "15M": a15,
-      "5M": a5
-    }
-  };
+    analysis:analyses};
 }
 
 function buildTrendlineTelegramMessage(result) {
@@ -3204,11 +3057,12 @@ function buildTrendlineTelegramMessage(result) {
   return message;
 }
 
-function trendlineAlertKey(result) {
-  const signal = result.TRENDLINE_SIGNAL || {};
+function trendlineAlertKey(result, timeframe = "5M") {
+  const selected = result?.INDEPENDENT_TRADE_SIGNALS?.[timeframe] || {};
+  const signal = selected.signal || {};
   if (!signal.direction || signal.direction === "None") return null;
-  const tl = result.TRENDLINES?.["1H"]?.[signal.direction === "BUY" ? "bullish" : "bearish"];
-  return `${signal.direction}:${tl?.breakoutIndex ?? "na"}:${tl?.breakoutPrice ?? "na"}`;
+  const tl = result.TRENDLINES?.[timeframe]?.[signal.direction === "BUY" ? "bullish" : "bearish"];
+  return `${timeframe}:${signal.direction}:${tl?.breakoutIndex ?? "na"}:${tl?.breakoutPrice ?? "na"}`;
 }
 
 /* =========================================================
@@ -4613,166 +4467,96 @@ let lastTrendlineMonitorDecision = null;
 let lastTrendlineTelegramResult = null;
 let lastTrendlineAlertKey = null;
 
-function getTrendlineMonitorDecision(result) {
-  const signal = result?.TRENDLINE_SIGNAL || {};
-  const levels = result?.TRADE_LEVELS || {};
-  const reasons = [];
+/*
+  Internal trade-state memory for Telegram safety alerts.
+  This does NOT claim that Liquid Chart has closed a position.
+  It only remembers the last signal for which the bot sent an entry alert.
+*/
+const activeTrendlineTrades = new Map();
+const lastDangerAlertKeys = new Map();
+const lastDangerAlertResults = new Map();
 
-  if (!signal.direction || signal.direction === "None") {
-    reasons.push("No confirmed trendline direction");
-  }
+function getOppositeDangerForTimeframe(result, timeframe) {
+  const activeTrade = activeTrendlineTrades.get(timeframe);
+  if (!activeTrade?.direction) return {danger:false,level:"NONE",direction:null,reasons:[],key:null,timeframe};
 
-  if (!Number.isFinite(Number(signal.score)) || Number(signal.score) < 7) {
-    reasons.push(`Score below 7 (${signal.score ?? 0}/10)`);
-  }
+  const opposite = activeTrade.direction === "BUY" ? "SELL" : "BUY";
+  const a = result?.analysis?.[timeframe];
+  const t = result?.TRENDLINES?.[timeframe] || {};
+  const candidate = buildIndependentTrendlineTradeSignal(opposite,timeframe,a,t);
+  const trend = opposite === "BUY" ? t.bullish : t.bearish;
+  const developing = !!(trend?.confirmed && trend?.strength !== "Weak" && (candidate?.structureAligned || candidate?.momentumAligned || candidate?.candleAligned));
+  const confirmed = !!candidate?.ready;
+  if (!developing && !confirmed) return {danger:false,level:"NONE",direction:opposite,reasons:[],key:null,timeframe};
 
-  if (!signal.confirmationGrade || signal.confirmationGrade === "NONE") {
-    reasons.push(`Confirmation grade is ${signal.confirmationGrade || "NONE"}`);
-  }
+  const key=`${timeframe}:${activeTrade.direction}->${opposite}:${trend?.breakoutIndex ?? "na"}:${trend?.breakoutPrice ?? "na"}:${candidate?.score ?? 0}`;
+  return {danger:true,level:confirmed?"CRITICAL":"DANGER",direction:opposite,score:candidate?.score??0,reasons:candidate?.reasons||[],warnings:candidate?.warnings||[],key,confirmed,timeframe};
+}
 
-  if (!levels.entry) reasons.push("Entry level missing");
-  if (!levels.stopLoss) reasons.push("Stop-loss missing");
-  if (!levels.takeProfit?.TP1) reasons.push("TP1 missing");
-
-  const eligible = reasons.length === 0;
-
-  return {
-    eligible,
-    reasons: eligible ? ["All Telegram alert conditions passed"] : reasons
-  };
+function buildDangerTelegramMessage(result,danger) {
+  const activeTrade=activeTrendlineTrades.get(danger.timeframe);
+  const active=activeTrade?.direction||"UNKNOWN";
+  let message=`âš ï¸ XAUUSD ${danger.level} ALERT\n\n`+
+    `Trade timeframe: ${danger.timeframe}\n`+
+    `Active trade: ${active}\n`+
+    `Opposite setup: ${danger.direction||"UNKNOWN"}\n`+
+    `Price: ${result?.currentPrice??"N/A"}\n`+
+    `${danger.timeframe} opposite score: ${danger.score??0}/11\n\n`;
+  if(danger.level==="CRITICAL") message+=`ðŸš¨ ACTION: CLOSE THE ${active} ${danger.timeframe} TRADE\nConfirmed opposite ${danger.direction} setup on the SAME timeframe.\n\n`;
+  else message+=`âš ï¸ ACTION: DANGER â€” REVIEW/CLOSE THE ${active} ${danger.timeframe} TRADE\nOpposite setup is developing on the SAME timeframe.\n\n`;
+  if(danger.reasons?.length) message+=`OPPOSITE CONFIRMATIONS\n`+danger.reasons.slice(0,8).map(x=>`â€¢ ${x}`).join("\n")+"\n";
+  if(danger.warnings?.length) message+=`\nWARNINGS\n`+danger.warnings.slice(0,6).map(x=>`â€¢ ${x}`).join("\n")+"\n";
+  return message;
 }
 
 async function monitorTrendlineSignal() {
-  if (trendlineMonitorRunning) {
-    console.log("Trendline monitor skipped: previous run still active");
-    return;
-  }
-
-  trendlineMonitorRunning = true;
-  lastTrendlineMonitorStartedAt = new Date().toISOString();
-  const startedAt = Date.now();
-
+  if (trendlineMonitorRunning) { console.log("Trendline monitor skipped: previous run still active"); return; }
+  trendlineMonitorRunning=true; lastTrendlineMonitorStartedAt=new Date().toISOString(); const startedAt=Date.now();
   try {
-    const [
-      candles1H,
-      candles15M,
-      candles5M
-    ] = await Promise.all([
-      getCandles(TF["1H"], 350),
-      getCandles(TF["15M"], 350),
-      getCandles(TF["5M"], 350)
-    ]);
+    const [candles1H,candles15M,candles5M]=await Promise.all([getCandles(TF["1H"],350),getCandles(TF["15M"],350),getCandles(TF["5M"],350)]);
+    const result=trendlineAnalysis(candles1H,candles15M,candles5M);
+    const primary=result.TRENDLINE_SIGNAL||{};
+    const primaryLevels=result.TRADE_LEVELS||{};
+    lastTrendlineMonitorSignal={direction:primary.direction||"None",status:primary.status||"WAITING",score:primary.score??0,maxScore:primary.maxScore??11,confirmationGrade:primary.confirmationGrade||"NONE",signalTimeframe:primary.signalTimeframe||"5M",currentPrice:result.currentPrice??null,tradeLevelsAvailable:!!(primaryLevels.entry&&primaryLevels.stopLoss&&primaryLevels.takeProfit?.TP1),activeTrades:Object.fromEntries([...activeTrendlineTrades].map(([tf,v])=>[tf,v.direction]))};
 
-    const result = trendlineAnalysis(
-      candles1H,
-      candles15M,
-      candles5M
-    );
+    const perTf={};
+    for(const tf of ["1H","15M","5M"]){
+      const selected=result.INDEPENDENT_TRADE_SIGNALS?.[tf]||{};
+      const signal=selected.signal||{}; const levels=selected.levels||{};
+      const eligible=!!(signal.ready&&signal.direction&&levels.entry&&levels.stopLoss&&levels.takeProfit?.TP1);
+      const key=trendlineAlertKey(result,tf);
+      const stateKey=`XAUUSD:${tf}`; const previousKey=TRENDLINE_ALERT_STATE.get(stateKey)||null;
+      perTf[tf]={eligible,direction:signal.direction||"None",score:signal.score??0,confirmationGrade:signal.score>=9?"STRONG":signal.score>=7?"CONFIRMED":signal.score>=5?"WATCH":"NONE",entry:levels.entry??null,stopLoss:levels.stopLoss??null,TP1:levels.takeProfit?.TP1??null,alertKey:key,previousAlertKey:previousKey,duplicateSuppressed:!!(key&&previousKey===key)};
 
-    const signal = result.TRENDLINE_SIGNAL || {};
-    const decision = getTrendlineMonitorDecision(result);
-    const key = trendlineAlertKey(result);
-    const previousKey = TRENDLINE_ALERT_STATE.get("XAUUSD") || null;
-
-    lastTrendlineMonitorSignal = {
-      direction: signal.direction || "None",
-      status: signal.status || "WAITING",
-      score: signal.score ?? 0,
-      maxScore: signal.maxScore ?? 10,
-      confirmationGrade: signal.confirmationGrade || "NONE",
-      currentPrice: result.currentPrice ?? null,
-      tradeLevelsAvailable: !!(
-        result.TRADE_LEVELS?.entry &&
-        result.TRADE_LEVELS?.stopLoss &&
-        result.TRADE_LEVELS?.takeProfit?.TP1
-      )
-    };
-
-    lastTrendlineMonitorDecision = {
-      ...decision,
-      alertKey: key,
-      previousAlertKey: previousKey,
-      duplicateSuppressed: !!(key && previousKey === key)
-    };
-
-    console.log(
-      "Trendline monitor check:",
-      JSON.stringify({
-        ...lastTrendlineMonitorSignal,
-        eligible: decision.eligible,
-        reasons: decision.reasons,
-        alertKey: key,
-        duplicateSuppressed: !!(key && previousKey === key)
-      })
-    );
-
-    if (decision.eligible) {
-      if (key && previousKey !== key) {
-        const telegram = await sendTelegramMessage(
-          buildTrendlineTelegramMessage(result)
-        );
-
-        lastTrendlineTelegramResult = {
-          ...telegram,
-          attemptedAt: new Date().toISOString(),
-          alertKey: key
-        };
-
-        if (telegram?.sent) {
-          TRENDLINE_ALERT_STATE.set("XAUUSD", key);
-          lastTrendlineAlertKey = key;
-          console.log("Trendline Telegram alert sent:", key);
-        } else {
-          console.log("Trendline Telegram alert failed:", telegram);
-        }
-      } else {
-        lastTrendlineTelegramResult = {
-          sent: false,
-          reason: "Duplicate Trendline signal suppressed",
-          attemptedAt: new Date().toISOString(),
-          alertKey: key
-        };
-        console.log("Trendline Telegram alert suppressed: duplicate", key);
+      const danger=getOppositeDangerForTimeframe(result,tf);
+      if(danger.danger&&danger.key!==lastDangerAlertKeys.get(tf)){
+        const telegram=await sendTelegramMessage(buildDangerTelegramMessage(result,danger));
+        const dangerResult={...telegram,attemptedAt:new Date().toISOString(),alertKey:danger.key,level:danger.level,timeframe:tf,activeDirection:activeTrendlineTrades.get(tf)?.direction||null,oppositeDirection:danger.direction};
+        lastDangerAlertResults.set(tf,dangerResult);
+        if(telegram?.sent){lastDangerAlertKeys.set(tf,danger.key);console.log("Opposite-trade danger alert sent:",danger.key);}
       }
-    } else {
-      lastTrendlineTelegramResult = {
-        sent: false,
-        reason: "Alert conditions not met",
-        attemptedAt: new Date().toISOString(),
-        reasons: decision.reasons,
-        alertKey: key
-      };
+
+      if(eligible&&key&&previousKey!==key){
+        const telegram=await sendTelegramMessage(buildTrendlineTelegramMessage({...result,TRENDLINE_SIGNAL:{...signal,signalTimeframe:tf},TRADE_LEVELS:levels}));
+        lastTrendlineTelegramResult={...telegram,attemptedAt:new Date().toISOString(),alertKey:key,timeframe:tf};
+        if(telegram?.sent){
+          TRENDLINE_ALERT_STATE.set(stateKey,key); lastTrendlineAlertKey=key;
+          activeTrendlineTrades.set(tf,{timeframe:tf,direction:signal.direction,entry:levels.entry,stopLoss:levels.stopLoss,takeProfit:levels.takeProfit||null,alertKey:key,startedAt:new Date().toISOString()});
+          lastDangerAlertKeys.delete(tf); lastDangerAlertResults.delete(tf);
+          console.log(`Independent ${tf} Trendline entry alert sent:`,key);
+        }
+      }
     }
 
-    lastTrendlineMonitorError = null;
-  } catch (error) {
-    lastTrendlineMonitorError = error.message;
-    lastTrendlineTelegramResult = {
-      sent: false,
-      reason: "Trendline monitor exception",
-      error: error.message,
-      attemptedAt: new Date().toISOString()
-    };
-    console.log(
-      "Trendline monitor error:",
-      error.message
-    );
-  } finally {
-    lastTrendlineMonitorFinishedAt = new Date().toISOString();
-    lastTrendlineMonitorDurationMs = Date.now() - startedAt;
-    trendlineMonitorRunning = false;
-  }
+    lastTrendlineMonitorDecision={eligible:Object.values(perTf).some(x=>x.eligible),independentTimeframes:perTf};
+    lastTrendlineMonitorError=null;
+  } catch(error){
+    lastTrendlineMonitorError=error.message; lastTrendlineTelegramResult={sent:false,reason:"Trendline monitor exception",error:error.message,attemptedAt:new Date().toISOString()}; console.log("Trendline monitor error:",error.message);
+  } finally { lastTrendlineMonitorFinishedAt=new Date().toISOString(); lastTrendlineMonitorDurationMs=Date.now()-startedAt; trendlineMonitorRunning=false; }
 }
 
-setTimeout(
-  monitorTrendlineSignal,
-  15000
-);
-
-setInterval(
-  monitorTrendlineSignal,
-  60 * 1000
-);
+setTimeout(monitorTrendlineSignal, 15000);
+setInterval(monitorTrendlineSignal, 60 * 1000);
 
 /* =========================================================
    ROOT
@@ -4819,7 +4603,9 @@ app.get(
         lastSignal: lastTrendlineMonitorSignal,
         lastDecision: lastTrendlineMonitorDecision,
         lastTelegram: lastTrendlineTelegramResult,
-        lastAlertKey: lastTrendlineAlertKey
+        lastAlertKey: lastTrendlineAlertKey,
+        activeTrades: Object.fromEntries([...activeTrendlineTrades].map(([tf,v]) => [tf,v])),
+        lastDangerAlerts: Object.fromEntries([...lastDangerAlertResults].map(([tf,v]) => [tf,v]))
       }
     });
   }
@@ -4846,7 +4632,9 @@ app.get(
         lastSignal: lastTrendlineMonitorSignal,
         lastDecision: lastTrendlineMonitorDecision,
         lastTelegram: lastTrendlineTelegramResult,
-        lastAlertKey: lastTrendlineAlertKey
+        lastAlertKey: lastTrendlineAlertKey,
+        activeTrades: Object.fromEntries([...activeTrendlineTrades].map(([tf,v]) => [tf,v])),
+        lastDangerAlerts: Object.fromEntries([...lastDangerAlertResults].map(([tf,v]) => [tf,v]))
       }
     });
   }
@@ -4999,7 +4787,7 @@ app.get(
 
         if (
           key &&
-          TRENDLINE_ALERT_STATE.get("XAUUSD") !== key
+          TRENDLINE_ALERT_STATE.get(`XAUUSD:${signal?.signalTimeframe || "5M"}`) !== key
         ) {
           telegram = await sendTelegramMessage(
             buildTrendlineTelegramMessage(result)
@@ -5007,7 +4795,7 @@ app.get(
 
           if (telegram?.sent) {
             TRENDLINE_ALERT_STATE.set(
-              "XAUUSD",
+              `XAUUSD:${signal?.signalTimeframe || "5M"}`,
               key
             );
           }
@@ -5086,7 +4874,7 @@ app.get(
         if (
           key &&
           TRENDLINE_ALERT_STATE.get(
-            "XAUUSD"
+            `XAUUSD:${trendlineSignal?.signalTimeframe || "5M"}`
           ) !== key
         ) {
           trendlineTelegram =
@@ -5098,7 +4886,7 @@ app.get(
 
           if (trendlineTelegram?.sent) {
             TRENDLINE_ALERT_STATE.set(
-              "XAUUSD",
+              `XAUUSD:${signal?.signalTimeframe || "5M"}`,
               key
             );
           }
