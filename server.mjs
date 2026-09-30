@@ -4605,11 +4605,52 @@ setInterval(
 
 let lastTrendlineMonitorError = null;
 let trendlineMonitorRunning = false;
+let lastTrendlineMonitorStartedAt = null;
+let lastTrendlineMonitorFinishedAt = null;
+let lastTrendlineMonitorDurationMs = null;
+let lastTrendlineMonitorSignal = null;
+let lastTrendlineMonitorDecision = null;
+let lastTrendlineTelegramResult = null;
+let lastTrendlineAlertKey = null;
+
+function getTrendlineMonitorDecision(result) {
+  const signal = result?.TRENDLINE_SIGNAL || {};
+  const levels = result?.TRADE_LEVELS || {};
+  const reasons = [];
+
+  if (!signal.direction || signal.direction === "None") {
+    reasons.push("No confirmed trendline direction");
+  }
+
+  if (!Number.isFinite(Number(signal.score)) || Number(signal.score) < 7) {
+    reasons.push(`Score below 7 (${signal.score ?? 0}/10)`);
+  }
+
+  if (!signal.confirmationGrade || signal.confirmationGrade === "NONE") {
+    reasons.push(`Confirmation grade is ${signal.confirmationGrade || "NONE"}`);
+  }
+
+  if (!levels.entry) reasons.push("Entry level missing");
+  if (!levels.stopLoss) reasons.push("Stop-loss missing");
+  if (!levels.takeProfit?.TP1) reasons.push("TP1 missing");
+
+  const eligible = reasons.length === 0;
+
+  return {
+    eligible,
+    reasons: eligible ? ["All Telegram alert conditions passed"] : reasons
+  };
+}
 
 async function monitorTrendlineSignal() {
-  if (trendlineMonitorRunning) return;
+  if (trendlineMonitorRunning) {
+    console.log("Trendline monitor skipped: previous run still active");
+    return;
+  }
 
   trendlineMonitorRunning = true;
+  lastTrendlineMonitorStartedAt = new Date().toISOString();
+  const startedAt = Date.now();
 
   try {
     const [
@@ -4628,54 +4669,97 @@ async function monitorTrendlineSignal() {
       candles5M
     );
 
-    const signal = result.TRENDLINE_SIGNAL;
+    const signal = result.TRENDLINE_SIGNAL || {};
+    const decision = getTrendlineMonitorDecision(result);
+    const key = trendlineAlertKey(result);
+    const previousKey = TRENDLINE_ALERT_STATE.get("XAUUSD") || null;
 
-    if (
-      signal?.direction &&
-      signal.direction !== "None" &&
-      signal.score >= 7 &&
-      signal.confirmationGrade !== "NONE" &&
-      result.TRADE_LEVELS?.entry &&
-      result.TRADE_LEVELS?.stopLoss &&
-      result.TRADE_LEVELS?.takeProfit?.TP1
-    ) {
-      const key = trendlineAlertKey(result);
+    lastTrendlineMonitorSignal = {
+      direction: signal.direction || "None",
+      status: signal.status || "WAITING",
+      score: signal.score ?? 0,
+      maxScore: signal.maxScore ?? 10,
+      confirmationGrade: signal.confirmationGrade || "NONE",
+      currentPrice: result.currentPrice ?? null,
+      tradeLevelsAvailable: !!(
+        result.TRADE_LEVELS?.entry &&
+        result.TRADE_LEVELS?.stopLoss &&
+        result.TRADE_LEVELS?.takeProfit?.TP1
+      )
+    };
 
-      if (
-        key &&
-        TRENDLINE_ALERT_STATE.get("XAUUSD") !== key
-      ) {
-        const telegram =
-          await sendTelegramMessage(
-            buildTrendlineTelegramMessage(result)
-          );
+    lastTrendlineMonitorDecision = {
+      ...decision,
+      alertKey: key,
+      previousAlertKey: previousKey,
+      duplicateSuppressed: !!(key && previousKey === key)
+    };
+
+    console.log(
+      "Trendline monitor check:",
+      JSON.stringify({
+        ...lastTrendlineMonitorSignal,
+        eligible: decision.eligible,
+        reasons: decision.reasons,
+        alertKey: key,
+        duplicateSuppressed: !!(key && previousKey === key)
+      })
+    );
+
+    if (decision.eligible) {
+      if (key && previousKey !== key) {
+        const telegram = await sendTelegramMessage(
+          buildTrendlineTelegramMessage(result)
+        );
+
+        lastTrendlineTelegramResult = {
+          ...telegram,
+          attemptedAt: new Date().toISOString(),
+          alertKey: key
+        };
 
         if (telegram?.sent) {
-          TRENDLINE_ALERT_STATE.set(
-            "XAUUSD",
-            key
-          );
-          console.log(
-            "Trendline Telegram alert sent:",
-            key
-          );
+          TRENDLINE_ALERT_STATE.set("XAUUSD", key);
+          lastTrendlineAlertKey = key;
+          console.log("Trendline Telegram alert sent:", key);
         } else {
-          console.log(
-            "Trendline Telegram alert failed:",
-            telegram
-          );
+          console.log("Trendline Telegram alert failed:", telegram);
         }
+      } else {
+        lastTrendlineTelegramResult = {
+          sent: false,
+          reason: "Duplicate Trendline signal suppressed",
+          attemptedAt: new Date().toISOString(),
+          alertKey: key
+        };
+        console.log("Trendline Telegram alert suppressed: duplicate", key);
       }
+    } else {
+      lastTrendlineTelegramResult = {
+        sent: false,
+        reason: "Alert conditions not met",
+        attemptedAt: new Date().toISOString(),
+        reasons: decision.reasons,
+        alertKey: key
+      };
     }
 
     lastTrendlineMonitorError = null;
   } catch (error) {
     lastTrendlineMonitorError = error.message;
+    lastTrendlineTelegramResult = {
+      sent: false,
+      reason: "Trendline monitor exception",
+      error: error.message,
+      attemptedAt: new Date().toISOString()
+    };
     console.log(
       "Trendline monitor error:",
       error.message
     );
   } finally {
+    lastTrendlineMonitorFinishedAt = new Date().toISOString();
+    lastTrendlineMonitorDurationMs = Date.now() - startedAt;
     trendlineMonitorRunning = false;
   }
 }
@@ -4722,12 +4806,47 @@ app.get(
         "/analyze",
         "/gemini-test",
         "/telegram-test",
-        "/trendline-analysis"
+        "/trendline-analysis",
+        "/trendline-monitor-status"
       ],
       trendlineMonitor: {
         intervalSeconds: 60,
         running: trendlineMonitorRunning,
-        lastError: lastTrendlineMonitorError
+        lastStartedAt: lastTrendlineMonitorStartedAt,
+        lastFinishedAt: lastTrendlineMonitorFinishedAt,
+        lastDurationMs: lastTrendlineMonitorDurationMs,
+        lastError: lastTrendlineMonitorError,
+        lastSignal: lastTrendlineMonitorSignal,
+        lastDecision: lastTrendlineMonitorDecision,
+        lastTelegram: lastTrendlineTelegramResult,
+        lastAlertKey: lastTrendlineAlertKey
+      }
+    });
+  }
+);
+
+/* =========================================================
+   TRENDLINE MONITOR STATUS
+   Diagnostic endpoint for the 60-second automatic monitor.
+========================================================= */
+
+app.get(
+  "/trendline-monitor-status",
+  (req, res) => {
+    res.json({
+      success: true,
+      instrument: OUTPUT_SYMBOL,
+      monitor: {
+        intervalSeconds: 60,
+        running: trendlineMonitorRunning,
+        lastStartedAt: lastTrendlineMonitorStartedAt,
+        lastFinishedAt: lastTrendlineMonitorFinishedAt,
+        lastDurationMs: lastTrendlineMonitorDurationMs,
+        lastError: lastTrendlineMonitorError,
+        lastSignal: lastTrendlineMonitorSignal,
+        lastDecision: lastTrendlineMonitorDecision,
+        lastTelegram: lastTrendlineTelegramResult,
+        lastAlertKey: lastTrendlineAlertKey
       }
     });
   }
