@@ -2674,6 +2674,11 @@ function trendlineScoreForDirection(
     warnings.push("15M breakout is weak");
   }
 
+  const oppositeFiveTrendline = isBullish ? t5.bearish : t5.bullish;
+  const oppositeFiveConfirmed =
+    !!oppositeFiveTrendline?.confirmed &&
+    oppositeFiveTrendline?.strength !== "Weak";
+
   const fiveStructure = isBullish
     ? (
         t5.analysis.structure.structure === "Bullish Structure" ||
@@ -2696,7 +2701,9 @@ function trendlineScoreForDirection(
         t5.analysis.indicators?.MACD?.bias === "Bearish"
       );
 
-  if (fiveStructure && fiveMomentum) {
+  if (oppositeFiveConfirmed) {
+    warnings.push("Opposite 5M trendline confirmation detected");
+  } else if (fiveStructure && fiveMomentum) {
     score += 2;
     reasons.push("5M entry direction confirmed");
   } else if (fiveStructure) {
@@ -2739,113 +2746,193 @@ function trendlineScoreForDirection(
 function buildTrendlineTradeLevels(direction, a1, a15, a5, trendlineData) {
   const currentPrice = num(a5.currentPrice);
   const atrValue = num(a5.indicators?.ATR14);
-  if (!Number.isFinite(currentPrice) || !Number.isFinite(atrValue) || atrValue <= 0) return null;
 
-  const buffer = atrValue * 0.10;
-  const minRisk = atrValue * 0.25;
-  const maxRisk = atrValue * 1.50;
+  if (!Number.isFinite(currentPrice) || !Number.isFinite(atrValue) || atrValue <= 0) {
+    return null;
+  }
 
+  const isBuy = direction === "BUY";
+  const isSell = direction === "SELL";
+
+  if (!isBuy && !isSell) {
+    return null;
+  }
+
+  const t = isBuy ? trendlineData?.bullish : trendlineData?.bearish;
   const s5 = a5.structure || {};
   const s15 = a15.structure || {};
-  const z5 = a5.zones || {};
-  const z15 = a15.zones || {};
 
-  const zoneValue = (arr, key) => Array.isArray(arr) ? arr.map(z => num(z?.[key])).filter(Number.isFinite) : [];
+  const swingLow5 = num(s5.latestSwingLow?.price);
+  const swingHigh5 = num(s5.latestSwingHigh?.price);
+  const swingLow15 = num(s15.latestSwingLow?.price);
+  const swingHigh15 = num(s15.latestSwingHigh?.price);
 
-  const stopRaw = direction === "SELL"
-    ? [
-        num(s5.latestSwingHigh?.price),
-        ...zoneValue(z5.supply, "high"),
-        ...zoneValue(z5.bearishOB, "high"),
-        num(s15.latestSwingHigh?.price),
-        ...zoneValue(z15.supply, "high"),
-        ...zoneValue(z15.bearishOB, "high"),
-        num(trendlineData?.bearish?.retest?.line),
-        num(trendlineData?.bearish?.trendline?.currentLine)
-      ]
-      .filter(Number.isFinite)
-      .filter(x => x > currentPrice)
-      .sort((a, b) => a - b)
-    : [
-        num(s5.latestSwingLow?.price),
-        ...zoneValue(z5.demand, "low"),
-        ...zoneValue(z5.bullishOB, "low"),
-        num(s15.latestSwingLow?.price),
-        ...zoneValue(z15.demand, "low"),
-        ...zoneValue(z15.bullishOB, "low"),
-        num(trendlineData?.bullish?.retest?.line),
-        num(trendlineData?.bullish?.trendline?.currentLine)
-      ]
-      .filter(Number.isFinite)
-      .filter(x => x < currentPrice)
-      .sort((a, b) => b - a);
+  const ob5 = isBuy
+    ? num(a5.orderBlocks?.bullish?.[0]?.low ?? a5.orderBlocks?.bullish?.[0]?.priceLow)
+    : num(a5.orderBlocks?.bearish?.[0]?.high ?? a5.orderBlocks?.bearish?.[0]?.priceHigh);
 
-  let stopLoss = Number.isFinite(stopRaw[0])
-    ? direction === "SELL" ? stopRaw[0] + buffer : stopRaw[0] - buffer
-    : direction === "SELL"
-      ? currentPrice + Math.max(minRisk, atrValue * 0.50)
-      : currentPrice - Math.max(minRisk, atrValue * 0.50);
+  const sd5 = isBuy
+    ? num(a5.supplyDemand?.demand?.[0]?.low ?? a5.supplyDemand?.demand?.[0]?.priceLow)
+    : num(a5.supplyDemand?.supply?.[0]?.high ?? a5.supplyDemand?.supply?.[0]?.priceHigh);
+
+  const retestLine = num(t?.retest?.line);
+  const trendlineLine = num(t?.trendline?.currentLine);
+  const breakoutPrice = num(t?.breakoutPrice);
+
+  const noiseBuffer = Math.max(atrValue * 0.08, 0.05);
+  const minimumRisk = atrValue * 0.25;
+  const maximumRisk = atrValue * 1.50;
+
+  // Prefer the latest 5M structural swing as the logical invalidation.
+  // Only levels on the correct side of entry are allowed.
+  const preferredStopCandidates = isBuy
+    ? [swingLow5, ob5, sd5, swingLow15, retestLine, trendlineLine, breakoutPrice]
+        .filter(Number.isFinite)
+        .filter(x => x < currentPrice)
+    : [swingHigh5, ob5, sd5, swingHigh15, retestLine, trendlineLine, breakoutPrice]
+        .filter(Number.isFinite)
+        .filter(x => x > currentPrice);
+
+  let stopBase = preferredStopCandidates[0] ?? null;
+
+  // If the preferred structural stop is too far away, use the closest
+  // valid structural level that still keeps risk inside the allowed range.
+  if (Number.isFinite(stopBase)) {
+    const candidateStops = preferredStopCandidates
+      .map(x => isBuy ? x - noiseBuffer : x + noiseBuffer)
+      .filter(x => Number.isFinite(x))
+      .filter(x => {
+        const r = Math.abs(currentPrice - x);
+        return r >= minimumRisk && r <= maximumRisk;
+      });
+
+    if (candidateStops.length) {
+      stopBase = isBuy
+        ? Math.max(...candidateStops)
+        : Math.min(...candidateStops);
+    }
+  }
+
+  let stopLoss = Number.isFinite(stopBase)
+    ? (isBuy ? stopBase - noiseBuffer : stopBase + noiseBuffer)
+    : (isBuy
+      ? currentPrice - Math.max(minimumRisk, atrValue * 0.50)
+      : currentPrice + Math.max(minimumRisk, atrValue * 0.50));
+
+  if (
+    (isBuy && stopLoss >= currentPrice) ||
+    (isSell && stopLoss <= currentPrice)
+  ) {
+    stopLoss = isBuy
+      ? currentPrice - Math.max(minimumRisk, atrValue * 0.50)
+      : currentPrice + Math.max(minimumRisk, atrValue * 0.50);
+  }
 
   let risk = Math.abs(currentPrice - stopLoss);
 
-  if (risk < minRisk) {
-    stopLoss = direction === "SELL" ? currentPrice + minRisk : currentPrice - minRisk;
-    risk = minRisk;
+  if (risk < minimumRisk) {
+    stopLoss = isBuy
+      ? currentPrice - minimumRisk
+      : currentPrice + minimumRisk;
+    risk = minimumRisk;
   }
 
-  if (!Number.isFinite(risk) || risk <= 0 || risk > maxRisk) return null;
+  if (risk > maximumRisk) {
+    stopLoss = isBuy
+      ? currentPrice - maximumRisk
+      : currentPrice + maximumRisk;
+    risk = maximumRisk;
+  }
 
-  const targetRaw = direction === "SELL"
-    ? [
-        num(a5.supportResistance?.support),
-        num(a5.supportResistance?.nextSupport),
-        ...zoneValue(z5.demand, "low"),
-        ...zoneValue(z5.bullishFVG, "low"),
-        num(trendlineData?.bearish?.targetProjection),
-        num(a15.supportResistance?.support),
-        num(a15.supportResistance?.nextSupport),
-        num(a1.supportResistance?.support),
-        num(a1.supportResistance?.nextSupport)
-      ]
-    : [
-        num(a5.supportResistance?.resistance),
-        num(a5.supportResistance?.nextResistance),
-        ...zoneValue(z5.supply, "high"),
-        ...zoneValue(z5.bearishFVG, "high"),
-        num(trendlineData?.bullish?.targetProjection),
-        num(a15.supportResistance?.resistance),
-        num(a15.supportResistance?.nextResistance),
-        num(a1.supportResistance?.resistance),
-        num(a1.supportResistance?.nextResistance)
-      ];
+  if (!Number.isFinite(risk) || risk <= 0) {
+    return null;
+  }
 
-  const validTargets = targetRaw
+  const supportLevels = [
+    num(a5.supportResistance?.support),
+    num(a5.supportResistance?.nextSupport),
+    swingLow5,
+    swingLow15,
+    num(a15.supportResistance?.support),
+    num(a15.supportResistance?.nextSupport),
+    num(a1.supportResistance?.support),
+    num(a1.supportResistance?.nextSupport)
+  ];
+
+  const resistanceLevels = [
+    num(a5.supportResistance?.resistance),
+    num(a5.supportResistance?.nextResistance),
+    swingHigh5,
+    swingHigh15,
+    num(a15.supportResistance?.resistance),
+    num(a15.supportResistance?.nextResistance),
+    num(a1.supportResistance?.resistance),
+    num(a1.supportResistance?.nextResistance)
+  ];
+
+  const projection = num(t?.targetProjection);
+
+  const targetPool = [
+    ...(isBuy ? resistanceLevels : supportLevels),
+    projection
+  ]
     .filter(Number.isFinite)
-    .filter(x => direction === "SELL" ? x < currentPrice : x > currentPrice)
-    .sort((a, b) => direction === "SELL" ? b - a : a - b)
-    .filter((x, i, arr) => arr.findIndex(v => Math.abs(v - x) < atrValue * 0.05) === i)
-    .filter(x => Math.abs(x - currentPrice) / risk >= 1.05);
+    .filter(x => isBuy ? x > currentPrice : x < currentPrice)
+    .sort((a, b) => isBuy ? a - b : b - a);
 
-  const fallback = direction === "SELL"
-    ? [currentPrice - risk * 1.25, currentPrice - risk * 2, currentPrice - risk * 3]
-    : [currentPrice + risk * 1.25, currentPrice + risk * 2, currentPrice + risk * 3];
-
+  const targetGap = Math.max(atrValue * 0.05, 0.01);
+  const minimumTargetRR = 1.05;
   const targets = [];
-  for (const x of [...validTargets, ...fallback]) {
-    if (!targets.some(v => Math.abs(v - x) < atrValue * 0.05)) targets.push(x);
-    if (targets.length >= 3) break;
+
+  // Ignore nearby structure that cannot produce acceptable RR.
+  // This prevents TP1 from being placed immediately into a support/resistance level.
+  for (const target of targetPool) {
+    const rr = Math.abs(target - currentPrice) / risk;
+
+    if (!Number.isFinite(rr) || rr < minimumTargetRR) {
+      continue;
+    }
+
+    if (targets.some(x => Math.abs(x - target) < targetGap)) {
+      continue;
+    }
+
+    targets.push(target);
+
+    if (targets.length >= 3) {
+      break;
+    }
   }
 
-  const tp1 = targets[0] ?? null;
-  const tp2 = targets[1] ?? null;
-  const tp3 = targets[2] ?? null;
-  const rr1 = Number.isFinite(tp1) ? Math.abs(tp1 - currentPrice) / risk : null;
+  // Dynamic RR is only a fallback when real market levels are insufficient.
+  for (const rr of [1.25, 2.0, 3.0]) {
+    if (targets.length >= 3) {
+      break;
+    }
 
-  if (!Number.isFinite(rr1) || rr1 < 1.05) return null;
+    const target = isBuy
+      ? currentPrice + risk * rr
+      : currentPrice - risk * rr;
 
-  const projection = direction === "BUY"
-    ? num(trendlineData?.bullish?.targetProjection)
-    : num(trendlineData?.bearish?.targetProjection);
+    if (
+      !targets.some(x => Math.abs(x - target) < targetGap)
+    ) {
+      targets.push(target);
+    }
+  }
+
+  if (targets.length < 3) {
+    return null;
+  }
+
+  const tp1 = targets[0];
+  const tp2 = targets[1];
+  const tp3 = targets[2];
+  const rr1 = Math.abs(tp1 - currentPrice) / risk;
+
+  if (!Number.isFinite(rr1) || rr1 < minimumTargetRR) {
+    return null;
+  }
 
   return {
     direction,
@@ -2858,8 +2945,8 @@ function buildTrendlineTradeLevels(direction, a1, a15, a5, trendlineData) {
       TP3: round(tp3, 5)
     },
     invalidation: round(stopLoss, 5),
-    targetMethod: "Trendline projection + nearby 5M/15M structure",
-    trendlineProjection: round(projection, 5),
+    targetMethod: "5M/15M/1H structure + trendline projection with RR-qualified dynamic fallback",
+    trendlineProjection: Number.isFinite(projection) ? round(projection, 5) : null,
     riskRewardTP1: round(rr1, 2)
   };
 }
@@ -2971,13 +3058,20 @@ function trendlineAnalysis(candles1H, candles15M, candles5M) {
     warnings = ["No valid trendline trade levels"];
   }
 
+  const finalConfirmed =
+    direction !== "None" &&
+    status !== "WAITING" &&
+    score >= 7;
+
   const signal = {
     status,
     direction,
     score,
     maxScore: 10,
     confirmationGrade:
-      score >= 9 ? "STRONG" : score >= 7 ? "CONFIRMED" : score >= 5 ? "WATCH" : "NONE",
+      finalConfirmed
+        ? (score >= 9 ? "STRONG" : "CONFIRMED")
+        : (score >= 5 ? "WATCH" : "NONE"),
     reasons,
     warnings,
     retest: direction === "BUY"
@@ -4451,6 +4545,61 @@ setInterval(
   sendHourlyTelegramStatus,
   60 * 60 * 1000
 );
+
+/*
+  Trendline alert monitor.
+  Runs every 60 seconds so a confirmed trendline setup
+  does not depend on somebody opening /analyze manually.
+*/
+setTimeout(
+  runTrendlineAlertMonitor,
+  15000
+);
+
+setInterval(
+  runTrendlineAlertMonitor,
+  60 * 1000
+);
+async function runTrendlineAlertMonitor() {
+  try {
+    const [
+      candles1H,
+      candles15M,
+      candles5M
+    ] = await Promise.all([
+      getCandles(TF["1H"], 350),
+      getCandles(TF["15M"], 350),
+      getCandles(TF["5M"], 350)
+    ]);
+
+    const result = trendlineAnalysis(
+      candles1H,
+      candles15M,
+      candles5M
+    );
+
+    const telegram =
+      await processTrendlineTelegramAlert(result);
+
+    console.log(
+      "Trendline alert monitor:",
+      telegram
+    );
+
+    return telegram;
+  } catch (error) {
+    console.log(
+      "Trendline alert monitor error:",
+      error.message
+    );
+
+    return {
+      sent: false,
+      error: error.message
+    };
+  }
+}
+
 /* =========================================================
    ROOT
 ========================================================= */
@@ -4600,6 +4749,54 @@ app.get(
    TRENDLINE ANALYSIS
 ========================================================= */
 
+async function processTrendlineTelegramAlert(result) {
+  const signal = result?.TRENDLINE_SIGNAL;
+
+  if (
+    !signal ||
+    signal.direction === "None" ||
+    !signal.direction ||
+    signal.status === "WAITING" ||
+    signal.score < 7 ||
+    !result?.TRADE_LEVELS?.entry
+  ) {
+    return {
+      sent: false,
+      reason: "No final confirmed trendline trade"
+    };
+  }
+
+  const key = trendlineAlertKey(result);
+
+  if (!key) {
+    return {
+      sent: false,
+      reason: "No valid trendline alert key"
+    };
+  }
+
+  if (TRENDLINE_ALERT_STATE.get("XAUUSD") === key) {
+    return {
+      sent: false,
+      reason: "Duplicate Trendline signal suppressed",
+      key
+    };
+  }
+
+  const telegram = await sendTelegramMessage(
+    buildTrendlineTelegramMessage(result)
+  );
+
+  if (telegram?.sent) {
+    TRENDLINE_ALERT_STATE.set("XAUUSD", key);
+  }
+
+  return {
+    ...telegram,
+    key
+  };
+}
+
 app.get(
   "/trendline-analysis",
   async (req, res) => {
@@ -4620,7 +4817,13 @@ app.get(
         candles5M
       );
 
-      res.json(result);
+      const trendlineTelegram =
+        await processTrendlineTelegramAlert(result);
+
+      res.json({
+        ...result,
+        TRENDLINE_TELEGRAM: trendlineTelegram
+      });
     } catch (error) {
       res.status(500).json({
         success: false,
@@ -4666,47 +4869,10 @@ app.get(
           );
       }
 
-      let trendlineTelegram = null;
-      const trendlineResult =
-        mtf.TRENDLINE_ANALYSIS;
-      const trendlineSignal =
-        trendlineResult?.TRENDLINE_SIGNAL;
-
-      if (
-        trendlineSignal?.direction &&
-        trendlineSignal.direction !== "None" &&
-        trendlineSignal.score >= 7
-      ) {
-        const key = trendlineAlertKey(
-          trendlineResult
+      const trendlineTelegram =
+        await processTrendlineTelegramAlert(
+          mtf.TRENDLINE_ANALYSIS
         );
-
-        if (
-          key &&
-          TRENDLINE_ALERT_STATE.get(
-            "XAUUSD"
-          ) !== key
-        ) {
-          trendlineTelegram =
-            await sendTelegramMessage(
-              buildTrendlineTelegramMessage(
-                trendlineResult
-              )
-            );
-
-          if (trendlineTelegram?.sent) {
-            TRENDLINE_ALERT_STATE.set(
-              "XAUUSD",
-              key
-            );
-          }
-        } else {
-          trendlineTelegram = {
-            sent: false,
-            reason: "Duplicate Trendline signal suppressed"
-          };
-        }
-      }
 
       res.json({
         ...mtf,
