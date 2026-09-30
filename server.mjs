@@ -109,7 +109,7 @@ function normalizeBiquoteCandles(bars) {
       high: num(x.high),
       low: num(x.low),
       close: num(x.close),
-      volume: num(x.volume ?? x.tickVolume)
+      volume: num(x.volume) > 0 ? num(x.volume) : num(x.tickVolume)
     }))
     .filter(
       x =>
@@ -2317,207 +2317,166 @@ function entryConfirmation(
   const bearishReasons = [];
 
   const bullishStructureBreak =
-    a5.breakDirection ===
-    "Bullish";
+    a5.breakDirection === "Bullish";
 
   const bearishStructureBreak =
-    a5.breakDirection ===
-    "Bearish";
+    a5.breakDirection === "Bearish";
 
   const bullishTechnical =
     a5.indicators?.RSI14 > 50 &&
-    a5.indicators?.MACD?.bias ===
-      "Bullish";
+    a5.indicators?.MACD?.bias === "Bullish";
 
   const bearishTechnical =
     a5.indicators?.RSI14 < 50 &&
-    a5.indicators?.MACD?.bias ===
-      "Bearish";
+    a5.indicators?.MACD?.bias === "Bearish";
 
   const bullishHTF =
-    a1.structure.structure !==
-    "Bearish Structure";
+    a1.structure.structure !== "Bearish Structure";
 
   const bearishHTF =
-    a1.structure.structure !==
-    "Bullish Structure";
+    a1.structure.structure !== "Bullish Structure";
 
-  if (
-    a1.structure.structure ===
-    "Bullish Structure"
-  ) {
+  if (a1.structure.structure === "Bullish Structure") {
     bullishScore += 2;
-    bullishReasons.push(
-      "1H bullish structure"
-    );
+    bullishReasons.push("1H bullish structure");
   }
 
-  if (
-    a15.structure.structure ===
-    "Bullish Structure"
-  ) {
+  if (a15.structure.structure === "Bullish Structure") {
     bullishScore += 1;
-    bullishReasons.push(
-      "15M bullish structure"
-    );
+    bullishReasons.push("15M bullish structure");
   }
 
-  if (
-    a15.breakDirection ===
-    "Bullish"
-  ) {
+  if (a15.breakDirection === "Bullish") {
     bullishScore += 2;
-    bullishReasons.push(
-      "15M bullish structure confirmation"
-    );
+    bullishReasons.push("15M bullish structure confirmation");
   }
 
-  if (
-    bullishStructureBreak
-  ) {
+  if (bullishStructureBreak) {
     bullishScore += 3;
-    bullishReasons.push(
-      "5M bullish break"
-    );
+    bullishReasons.push("5M bullish break");
   }
 
-  if (
-    a5.indicators?.RSI14 >
-    50
-  ) {
+  if (a5.indicators?.RSI14 > 50) {
     bullishScore += 1;
-    bullishReasons.push(
-      "RSI above 50"
-    );
+    bullishReasons.push("RSI above 50");
   }
 
-  if (
-    a5.indicators?.MACD?.bias ===
-    "Bullish"
-  ) {
+  if (a5.indicators?.MACD?.bias === "Bullish") {
     bullishScore += 1;
-    bullishReasons.push(
-      "MACD bullish"
-    );
+    bullishReasons.push("MACD bullish");
   }
 
-  if (
-    a5.liquidity?.latestSweep ===
-    "Bullish Liquidity Sweep"
-  ) {
+  if (a5.liquidity?.latestSweep === "Bullish Liquidity Sweep") {
     bullishScore += 2;
-    bullishReasons.push(
-      "Bullish liquidity sweep"
-    );
+    bullishReasons.push("Bullish liquidity sweep");
   }
 
   if (
-    a5.candle?.direction ===
-      "Bullish" &&
+    a5.candle?.direction === "Bullish" &&
     (
-      a5.candle?.strength ===
-        "Strong" ||
-      a5.candle?.patterns?.includes(
-        "Bullish Engulfing"
-      ) ||
-      a5.candle?.patterns?.includes(
-        "Bullish Rejection"
-      )
+      a5.candle?.strength === "Strong" ||
+      a5.candle?.patterns?.includes("Bullish Engulfing") ||
+      a5.candle?.patterns?.includes("Bullish Rejection")
     )
   ) {
     bullishScore += 1;
-    bullishReasons.push(
-      "Bullish candle confirmation"
-    );
+    bullishReasons.push("Bullish candle confirmation");
   }
 
-  if (
-    a1.structure.structure ===
-    "Bearish Structure"
-  ) {
+  if (a1.structure.structure === "Bearish Structure") {
     bearishScore += 2;
-    bearishReasons.push(
-      "1H bearish structure"
-    );
+    bearishReasons.push("1H bearish structure");
   }
 
-  if (
-    a15.structure.structure ===
-    "Bearish Structure"
-  ) {
+  if (a15.structure.structure === "Bearish Structure") {
     bearishScore += 1;
-    bearishReasons.push(
-      "15M bearish structure"
-    );
+    bearishReasons.push("15M bearish structure");
   }
 
-  if (
-    a15.breakDirection ===
-    "Bearish"
-  ) {
+  if (a15.breakDirection === "Bearish") {
     bearishScore += 2;
-    bearishReasons.push(
-      "15M bearish structure confirmation"
-    );
+    bearishReasons.push("15M bearish structure confirmation");
   }
 
-  if (
-    bearishStructureBreak
-  ) {
+  if (bearishStructureBreak) {
     bearishScore += 3;
-    bearishReasons.push(
-      "5M bearish break"
-    );
+    bearishReasons.push("5M bearish break");
   }
 
-  if (
-    a5.indicators?.RSI14 <
-    50
-  ) {
+  if (a5.indicators?.RSI14 < 50) {
     bearishScore += 1;
-    bearishReasons.push(
-      "RSI below 50"
-    );
+    bearishReasons.push("RSI below 50");
   }
 
-  if (
-    a5.indicators?.MACD?.bias ===
-    "Bearish"
-  ) {
+  if (a5.indicators?.MACD?.bias === "Bearish") {
     bearishScore += 1;
-    bearishReasons.push(
-      "MACD bearish"
-    );
+    bearishReasons.push("MACD bearish");
   }
 
-  if (
-    a5.liquidity?.latestSweep ===
-    "Bearish Liquidity Sweep"
-  ) {
+  if (a5.liquidity?.latestSweep === "Bearish Liquidity Sweep") {
     bearishScore += 2;
-    bearishReasons.push(
-      "Bearish liquidity sweep"
-    );
+    bearishReasons.push("Bearish liquidity sweep");
   }
 
   if (
-    a5.candle?.direction ===
-      "Bearish" &&
+    a5.candle?.direction === "Bearish" &&
     (
-      a5.candle?.strength ===
-        "Strong" ||
-      a5.candle?.patterns?.includes(
-        "Bearish Engulfing"
-      ) ||
-      a5.candle?.patterns?.includes(
-        "Bearish Rejection"
-      )
+      a5.candle?.strength === "Strong" ||
+      a5.candle?.patterns?.includes("Bearish Engulfing") ||
+      a5.candle?.patterns?.includes("Bearish Rejection")
     )
   ) {
     bearishScore += 1;
-    bearishReasons.push(
-      "Bearish candle confirmation"
-    );
+    bearishReasons.push("Bearish candle confirmation");
+  }
+
+  const bullishPriceActionConfirmations = [];
+  const bearishPriceActionConfirmations = [];
+
+  if (bullishStructureBreak) {
+    bullishPriceActionConfirmations.push("5M bullish break");
+  }
+  if (a15.breakDirection === "Bullish") {
+    bullishPriceActionConfirmations.push("15M bullish break");
+  }
+  if (a5.liquidity?.latestSweep === "Bullish Liquidity Sweep") {
+    bullishPriceActionConfirmations.push("Bullish liquidity sweep");
+  }
+  if (
+    a5.candle?.direction === "Bullish" &&
+    (
+      a5.candle?.strength === "Strong" ||
+      a5.candle?.patterns?.includes("Bullish Engulfing") ||
+      a5.candle?.patterns?.includes("Bullish Rejection")
+    )
+  ) {
+    bullishPriceActionConfirmations.push("Bullish candle confirmation");
+  }
+  if (retest?.priceInBullishZone) {
+    bullishPriceActionConfirmations.push("Bullish retest zone");
+  }
+
+  if (bearishStructureBreak) {
+    bearishPriceActionConfirmations.push("5M bearish break");
+  }
+  if (a15.breakDirection === "Bearish") {
+    bearishPriceActionConfirmations.push("15M bearish break");
+  }
+  if (a5.liquidity?.latestSweep === "Bearish Liquidity Sweep") {
+    bearishPriceActionConfirmations.push("Bearish liquidity sweep");
+  }
+  if (
+    a5.candle?.direction === "Bearish" &&
+    (
+      a5.candle?.strength === "Strong" ||
+      a5.candle?.patterns?.includes("Bearish Engulfing") ||
+      a5.candle?.patterns?.includes("Bearish Rejection")
+    )
+  ) {
+    bearishPriceActionConfirmations.push("Bearish candle confirmation");
+  }
+  if (retest?.priceInBearishZone) {
+    bearishPriceActionConfirmations.push("Bearish retest zone");
   }
 
   const bullishConfirmed =
@@ -2525,66 +2484,103 @@ function entryConfirmation(
     bullishTechnical &&
     bullishHTF &&
     bullishScore >= 7 &&
-    bullishScore >
-      bearishScore + 2;
+    bullishScore > bearishScore + 2;
 
   const bearishConfirmed =
     bearishStructureBreak &&
     bearishTechnical &&
     bearishHTF &&
     bearishScore >= 7 &&
-    bearishScore >
-      bullishScore + 2;
+    bearishScore > bullishScore + 2;
 
-  let status =
-    "WAITING";
+  const bullishAGrade =
+    !bullishStructureBreak &&
+    !bearishStructureBreak &&
+    bullishTechnical &&
+    bullishHTF &&
+    (
+      a15.structure.structure === "Bullish Structure" ||
+      a15.breakDirection === "Bullish"
+    ) &&
+    bullishScore >= 6 &&
+    bullishScore > bearishScore + 2 &&
+    bullishPriceActionConfirmations.length >= 2;
 
-  let direction =
-    "None";
+  const bearishAGrade =
+    !bullishStructureBreak &&
+    !bearishStructureBreak &&
+    bearishTechnical &&
+    bearishHTF &&
+    (
+      a15.structure.structure === "Bearish Structure" ||
+      a15.breakDirection === "Bearish"
+    ) &&
+    bearishScore >= 6 &&
+    bearishScore > bullishScore + 2 &&
+    bearishPriceActionConfirmations.length >= 2;
 
-  if (
-    bullishConfirmed
-  ) {
-    status =
-      "BUY CONFIRMED";
+  let status = "WAITING";
+  let direction = "None";
+  let confirmationGrade = "None";
+  let potentialSetup = false;
+  let rejectionReason = "";
 
-    direction =
-      "BUY";
-  } else if (
-    bearishConfirmed
-  ) {
-    status =
-      "SELL CONFIRMED";
-
-    direction =
-      "SELL";
+  if (bullishConfirmed) {
+    status = "BUY CONFIRMED";
+    direction = "BUY";
+    confirmationGrade = "A+";
+  } else if (bearishConfirmed) {
+    status = "SELL CONFIRMED";
+    direction = "SELL";
+    confirmationGrade = "A+";
+  } else if (bullishAGrade) {
+    status = "BUY CONFIRMED";
+    direction = "BUY";
+    confirmationGrade = "A";
+    potentialSetup = true;
+  } else if (bearishAGrade) {
+    status = "SELL CONFIRMED";
+    direction = "SELL";
+    confirmationGrade = "A";
+    potentialSetup = true;
+  } else {
+    const reasons = [];
+    if (!bullishStructureBreak && !bearishStructureBreak) {
+      reasons.push("5M structure break not confirmed");
+    }
+    if (Math.abs(bullishScore - bearishScore) <= 2) {
+      reasons.push("Bullish/Bearish score difference is too small");
+    }
+    if (
+      bullishPriceActionConfirmations.length < 2 &&
+      bearishPriceActionConfirmations.length < 2
+    ) {
+      reasons.push("Not enough price-action/liquidity confirmation");
+    }
+    if (!retest?.priceInBullishZone && !retest?.priceInBearishZone) {
+      reasons.push("No active retest zone confirmation");
+    }
+    rejectionReason = reasons.join("; ");
   }
 
   return {
     status,
-
     direction,
-
+    confirmationGrade,
+    potentialSetup,
     bullishScore,
-
     bearishScore,
-
     bullishReasons,
-
     bearishReasons,
-
     bullishTechnical,
-
     bearishTechnical,
-
     bullishHTF,
-
     bearishHTF,
-
     bullishStructureBreak,
-
     bearishStructureBreak,
-
+    bullishPriceActionConfirmations,
+    bearishPriceActionConfirmations,
+    rejectionReason,
     retest
   };
 }
@@ -3036,32 +3032,61 @@ async function openRouterAnalysis(mtf) {
     };
   }
 
-  const prompt = `
-You are a financial market analysis assistant.
+  const entry = mtf.ENTRY_CONFIRMATION || {};
+  const a1 = mtf.analysis?.["1H"] || {};
+  const a15 = mtf.analysis?.["15M"] || {};
+  const a5 = mtf.analysis?.["5M"] || {};
 
-Analyze XAUUSD using ONLY the supplied technical engine output.
-Do not invent price data.
+  const compactData = {
+    price: entry.currentPrice ?? mtf.importantLevels?.currentPrice,
+    mtf: mtf.MTF,
+    structure: mtf.MTF_STRUCTURE,
+    confirmation: {
+      status: entry.status,
+      direction: entry.direction,
+      grade: entry.confirmationGrade,
+      bullishScore: entry.bullishScore,
+      bearishScore: entry.bearishScore,
+      bullishReasons: entry.bullishReasons?.slice(0, 6),
+      bearishReasons: entry.bearishReasons?.slice(0, 6),
+      bullishPA: entry.bullishPriceActionConfirmations,
+      bearishPA: entry.bearishPriceActionConfirmations,
+      rejection: entry.rejectionReason
+    },
+    structureBreaks: {
+      "1H": { BOS: a1.BOS, CHoCH: a1.CHoCH, MSS: a1.MSS },
+      "15M": { BOS: a15.BOS, CHoCH: a15.CHoCH, MSS: a15.MSS },
+      "5M": { BOS: a5.BOS, CHoCH: a5.CHoCH, MSS: a5.MSS }
+    },
+    technical: {
+      "1H": {
+        trend: a1.trend,
+        RSI: a1.indicators?.RSI14,
+        MACD: a1.indicators?.MACD?.bias
+      },
+      "15M": {
+        trend: a15.trend,
+        RSI: a15.indicators?.RSI14,
+        MACD: a15.indicators?.MACD?.bias
+      },
+      "5M": {
+        trend: a5.trend,
+        RSI: a5.indicators?.RSI14,
+        MACD: a5.indicators?.MACD?.bias
+      }
+    },
+    liquidity: { "5M": a5.liquidity?.latestSweep },
+    candle: { "5M": a5.candle },
+    retest: mtf.RETEST,
+    invalidation: mtf.INVALIDATION,
+    levels: mtf.importantLevels
+  };
 
-Explain:
-1. 1H bias
-2. 15M bias
-3. 5M bias
-4. Market structure
-5. BOS / CHoCH / MSS
-6. Liquidity
-7. FVG
-8. Order blocks
-9. Retest
-10. Entry confirmation
-11. Invalidation
-12. Why the engine is BUY, SELL or WAITING
-
-If confirmation is insufficient, explicitly say WAITING.
-Do not claim certainty or guaranteed profit.
-
-DATA:
-${JSON.stringify(mtf, null, 2)}
-`;
+  const prompt = `Analyze XAUUSD using ONLY this engine output.
+Return a concise technical explanation covering 1H/15M/5M bias, market structure, BOS/CHoCH/MSS, liquidity, price action, retest, entry confirmation and invalidation.
+Respect the engine decision. If status is WAITING, say WAITING. Do not invent data or claim guaranteed profit.
+ENGINE:
+${JSON.stringify(compactData)}`;
 
   try {
     const response = await fetch(
@@ -3076,18 +3101,10 @@ ${JSON.stringify(mtf, null, 2)}
         },
         body: JSON.stringify({
           model: OPENROUTER_MODEL,
-          models: [
-            OPENROUTER_MODEL,
-            OPENROUTER_FALLBACK_MODEL
-          ],
-          messages: [
-            {
-              role: "user",
-              content: prompt
-            }
-          ],
+          models: [OPENROUTER_MODEL, OPENROUTER_FALLBACK_MODEL],
+          messages: [{ role: "user", content: prompt }],
           temperature: 0.2,
-          max_tokens: 3000
+          max_tokens: 750
         })
       }
     );
@@ -3102,9 +3119,7 @@ ${JSON.stringify(mtf, null, 2)}
       };
     }
 
-    const text =
-      json.choices?.[0]?.message?.content ||
-      "";
+    const text = json.choices?.[0]?.message?.content || "";
 
     if (!text) {
       return {
@@ -3127,105 +3142,6 @@ ${JSON.stringify(mtf, null, 2)}
       error: error.message
     };
   }
-}
-
-async function geminiAnalysis(mtf) {
-  const prompt = `
-You are a financial market analysis assistant.
-
-Analyze XAUUSD using ONLY the supplied technical engine output.
-Do not invent price data.
-
-Explain:
-1. 1H bias
-2. 15M bias
-3. 5M bias
-4. Market structure
-5. BOS / CHoCH / MSS
-6. Liquidity
-7. FVG
-8. Order blocks
-9. Retest
-10. Entry confirmation
-11. Invalidation
-12. Why the engine is BUY, SELL or WAITING
-
-If confirmation is insufficient, explicitly say WAITING.
-Do not claim certainty or guaranteed profit.
-
-DATA:
-${JSON.stringify(mtf, null, 2)}
-`;
-
-  if (GEMINI_API_KEY) {
-    try {
-      const response = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_API_KEY
-          },
-          body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  { text: prompt }
-                ]
-              }
-            ]
-          })
-        }
-      );
-
-      const json = await response.json();
-
-      if (response.ok) {
-        const text =
-          json.candidates?.[0]?.content?.parts?.[0]?.text ||
-          "";
-
-        if (text) {
-          return {
-            available: true,
-            provider: "Gemini",
-            model: "gemini-3.8-flash",
-            text
-          };
-        }
-      }
-
-      console.log(
-        "Gemini failed; trying OpenRouter fallback:",
-        json.error?.message || "empty Gemini response"
-      );
-    } catch (error) {
-      console.log(
-        "Gemini request error; trying OpenRouter fallback:",
-        error.message
-      );
-    }
-  } else {
-    console.log(
-      "GEMINI_API_KEY not configured; trying OpenRouter fallback."
-    );
-  }
-
-  const fallback = await openRouterAnalysis(mtf);
-
-  if (fallback.available) {
-    return fallback;
-  }
-
-  return {
-    available: false,
-    provider: "Gemini + OpenRouter",
-    error:
-      fallback.error ||
-      fallback.message ||
-      "Gemini and OpenRouter analysis unavailable"
-  };
 }
 
 /* =========================================================
