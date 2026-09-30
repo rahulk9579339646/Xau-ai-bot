@@ -29,6 +29,18 @@ const CACHE = new Map();
 const CACHE_MS = 15000;
 const TRENDLINE_ALERT_STATE = new Map();
 
+// Latest analysis cache used by Telegram commands.
+let latestMainAnalysis = null;
+let latestMainAnalysisAt = null;
+let latestMainAnalysisError = null;
+
+// Telegram command polling state. Only TELEGRAM_CHAT_ID is authorized.
+let telegramPollingRunning = false;
+let telegramUpdateOffset = 0;
+let telegramPollingTimer = null;
+let telegramLastPollAt = null;
+let telegramLastPollError = null;
+
 /* =========================================================
    BASIC HELPERS
 ========================================================= */
@@ -4466,6 +4478,9 @@ let lastTrendlineMonitorSignal = null;
 let lastTrendlineMonitorDecision = null;
 let lastTrendlineTelegramResult = null;
 let lastTrendlineAlertKey = null;
+let trendlineMonitorEnabled = true;
+let trendlineMonitorTimer = null;
+let trendlineMonitorInitialTimer = null;
 
 /*
   Internal trade-state memory for Telegram safety alerts.
@@ -4555,8 +4570,267 @@ async function monitorTrendlineSignal() {
   } finally { lastTrendlineMonitorFinishedAt=new Date().toISOString(); lastTrendlineMonitorDurationMs=Date.now()-startedAt; trendlineMonitorRunning=false; }
 }
 
-setTimeout(monitorTrendlineSignal, 15000);
-setInterval(monitorTrendlineSignal, 60 * 1000);
+function startTrendlineMonitor(runNow = false) {
+  trendlineMonitorEnabled = true;
+
+  if (trendlineMonitorTimer) {
+    clearInterval(trendlineMonitorTimer);
+  }
+  if (trendlineMonitorInitialTimer) {
+    clearTimeout(trendlineMonitorInitialTimer);
+  }
+
+  trendlineMonitorTimer = setInterval(() => {
+    if (trendlineMonitorEnabled) monitorTrendlineSignal();
+  }, 60 * 1000);
+
+  if (runNow) {
+    monitorTrendlineSignal();
+  } else {
+    trendlineMonitorInitialTimer = setTimeout(() => {
+      if (trendlineMonitorEnabled) monitorTrendlineSignal();
+    }, 15000);
+  }
+
+  return true;
+}
+
+function stopTrendlineMonitor() {
+  trendlineMonitorEnabled = false;
+  if (trendlineMonitorTimer) {
+    clearInterval(trendlineMonitorTimer);
+    trendlineMonitorTimer = null;
+  }
+  if (trendlineMonitorInitialTimer) {
+    clearTimeout(trendlineMonitorInitialTimer);
+    trendlineMonitorInitialTimer = null;
+  }
+  return true;
+}
+
+startTrendlineMonitor(false);
+
+/* =========================================================
+   TELEGRAM COMMAND CONTROL
+   Polls Telegram every few seconds. Only the configured
+   TELEGRAM_CHAT_ID can execute bot commands.
+========================================================= */
+
+function telegramAuthorizedChat(chatId) {
+  return String(chatId ?? "") === String(TELEGRAM_CHAT_ID ?? "");
+}
+
+function telegramCommandHelp() {
+  return [
+    "XAU AI BOT â€” TELEGRAM COMMANDS",
+    "",
+    "/status â€” full bot status",
+    "/signal â€” latest main signal",
+    "/trendline â€” 1H / 15M / 5M trendline status",
+    "/analysis â€” latest main engine analysis",
+    "/health â€” server/API/Telegram health",
+    "/scan â€” run a new full analysis now",
+    "/startmonitor â€” start 60-second trendline monitor",
+    "/stopmonitor â€” stop trendline monitor",
+    "/help â€” show this help"
+  ].join("\n");
+}
+
+function formatTrendlineCommand() {
+  const d = lastTrendlineMonitorDecision?.independentTimeframes || {};
+  const lines = [
+    "XAUUSD TRENDLINE MONITOR",
+    `Monitor: ${trendlineMonitorEnabled ? "RUNNING" : "STOPPED"}`,
+    `Last scan: ${lastTrendlineMonitorFinishedAt || "N/A"}`,
+    `Primary: ${lastTrendlineMonitorSignal?.direction || "None"} | ${lastTrendlineMonitorSignal?.status || "WAITING"} | score ${lastTrendlineMonitorSignal?.score ?? 0}/${lastTrendlineMonitorSignal?.maxScore ?? 11}`,
+    ""
+  ];
+  for (const tf of ["1H", "15M", "5M"]) {
+    const x = d[tf] || {};
+    lines.push(`${tf}: ${x.direction || "None"} | ${x.confirmationGrade || "NONE"} | score ${x.score ?? 0} | eligible ${x.eligible ? "YES" : "NO"}`);
+    if (x.entry != null) lines.push(`  Entry ${x.entry} | SL ${x.stopLoss ?? "N/A"} | TP1 ${x.TP1 ?? "N/A"}`);
+  }
+  return lines.join("\n");
+}
+
+function formatLatestSignal() {
+  const mtf = latestMainAnalysis;
+  if (!mtf) return "No cached main analysis yet. Use /scan.";
+  const e = mtf.ENTRY_CONFIRMATION || {};
+  const l = mtf.TRADE_LEVELS || {};
+  return [
+    "XAUUSD LATEST MAIN SIGNAL",
+    `Updated: ${latestMainAnalysisAt || "N/A"}`,
+    `Price: ${e.currentPrice ?? mtf.importantLevels?.currentPrice ?? "N/A"}`,
+    `Status: ${e.status || "Waiting"}`,
+    `Direction: ${e.direction || "None"}`,
+    `1H: ${mtf.MTF?.["1H"] || "N/A"}`,
+    `15M: ${mtf.MTF?.["15M"] || "N/A"}`,
+    `5M: ${mtf.MTF?.["5M"] || "N/A"}`,
+    `Alignment: ${mtf.MTF?.alignment || "N/A"}`,
+    `Bull score: ${e.bullishScore ?? 0} | Bear score: ${e.bearishScore ?? 0}`,
+    `Entry: ${l.entry ?? "N/A"} | SL: ${l.stopLoss ?? "N/A"} | TP1: ${l.takeProfit?.TP1 ?? "N/A"}`
+  ].join("\n");
+}
+
+function formatStatus() {
+  return [
+    "XAU AI BOT STATUS",
+    `Instrument: ${OUTPUT_SYMBOL}`,
+    `Uptime: ${Math.round(process.uptime())}s`,
+    `Monitor: ${trendlineMonitorEnabled ? "RUNNING" : "STOPPED"}`,
+    `Monitor scan active: ${trendlineMonitorRunning ? "YES" : "NO"}`,
+    `Monitor interval: 60s`,
+    `Last monitor start: ${lastTrendlineMonitorStartedAt || "N/A"}`,
+    `Last monitor finish: ${lastTrendlineMonitorFinishedAt || "N/A"}`,
+    `Last monitor error: ${lastTrendlineMonitorError || "None"}`,
+    `Latest main analysis: ${latestMainAnalysisAt || "Not yet run"}`,
+    `Latest signal: ${latestMainAnalysis?.ENTRY_CONFIRMATION?.direction || "None"} / ${latestMainAnalysis?.ENTRY_CONFIRMATION?.status || "Waiting"}`,
+    `Telegram configured: ${TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID ? "YES" : "NO"}`,
+    `Telegram polling error: ${telegramLastPollError || "None"}`,
+    `Last analysis error: ${latestMainAnalysisError || "None"}`
+  ].join("\n");
+}
+
+async function telegramHealthCheck() {
+  const result = {
+    server: "OK",
+    telegramConfig: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
+    telegramApi: "UNKNOWN",
+    twelveDataConfig: !!TWELVE_DATA_API_KEY,
+    aiConfig: !!(GEMINI_API_KEY || OPENROUTER_API_KEY),
+    checkedAt: new Date().toISOString()
+  };
+
+  if (!TELEGRAM_BOT_TOKEN) {
+    result.telegramApi = "NOT_CONFIGURED";
+    return result;
+  }
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
+    const data = await response.json();
+    result.telegramApi = response.ok && data.ok ? "OK" : `ERROR: ${data.description || "API failure"}`;
+  } catch (error) {
+    result.telegramApi = `ERROR: ${error.message}`;
+  }
+  return result;
+}
+
+async function runMainAnalysis({sendAlerts = false} = {}) {
+  const mtf = await mtfAnalysis();
+  const ai = await geminiAnalysis(mtf);
+  latestMainAnalysis = {...mtf, AI_ANALYSIS: ai};
+  latestMainAnalysisAt = new Date().toISOString();
+  latestMainAnalysisError = null;
+
+  if (sendAlerts) {
+    if (mtf.ENTRY_CONFIRMATION?.status === "BUY CONFIRMED" || mtf.ENTRY_CONFIRMATION?.status === "SELL CONFIRMED") {
+      await sendTelegramMessage(buildTelegramMessage(mtf));
+    }
+  }
+
+  return latestMainAnalysis;
+}
+
+async function handleTelegramCommand(message) {
+  if (!message?.chat || !telegramAuthorizedChat(message.chat.id)) return;
+  const raw = String(message.text || "").trim();
+  if (!raw.startsWith("/")) return;
+
+  const command = raw.split(/\s+/)[0].toLowerCase().split("@")[0];
+  const send = (text) => sendTelegramMessage(text);
+
+  try {
+    switch (command) {
+      case "/help":
+        await send(telegramCommandHelp());
+        break;
+      case "/status":
+        await send(formatStatus());
+        break;
+      case "/signal":
+        await send(formatLatestSignal());
+        break;
+      case "/trendline":
+        await send(formatTrendlineCommand());
+        break;
+      case "/analysis": {
+        if (!latestMainAnalysis) await runMainAnalysis();
+        const aiText = typeof latestMainAnalysis?.AI_ANALYSIS === "string"
+          ? latestMainAnalysis.AI_ANALYSIS
+          : JSON.stringify(latestMainAnalysis?.AI_ANALYSIS || "N/A");
+        await send(formatLatestSignal() + "\n\nAI ANALYSIS\n" + aiText);
+        break;
+      }
+      case "/health": {
+        const h = await telegramHealthCheck();
+        await send("XAU AI BOT HEALTH\n\n" + Object.entries(h).map(([k,v]) => `${k}: ${v}`).join("\n"));
+        break;
+      }
+      case "/scan": {
+        await send("ðŸ”Ž New XAUUSD analysis started...");
+        const result = await runMainAnalysis({sendAlerts:false});
+        const e = result.ENTRY_CONFIRMATION || {};
+        await send([
+          "XAUUSD SCAN COMPLETE",
+          `Price: ${e.currentPrice ?? result.importantLevels?.currentPrice ?? "N/A"}`,
+          `Status: ${e.status || "Waiting"}`,
+          `Direction: ${e.direction || "None"}`,
+          `1H/15M/5M: ${result.MTF?.["1H"] || "N/A"} / ${result.MTF?.["15M"] || "N/A"} / ${result.MTF?.["5M"] || "N/A"}`,
+          `Entry: ${result.TRADE_LEVELS?.entry ?? "N/A"}`,
+          `SL: ${result.TRADE_LEVELS?.stopLoss ?? "N/A"}`,
+          `TP1: ${result.TRADE_LEVELS?.takeProfit?.TP1 ?? "N/A"}`
+        ].join("\n"));
+        break;
+      }
+      case "/startmonitor":
+        startTrendlineMonitor(true);
+        await send("âœ… Trendline monitor STARTED. It will scan every 60 seconds.");
+        break;
+      case "/stopmonitor":
+        stopTrendlineMonitor();
+        await send("ðŸ›‘ Trendline monitor STOPPED. No 60-second scans will run until /startmonitor.");
+        break;
+      default:
+        await send("Unknown command. Use /help");
+    }
+  } catch (error) {
+    latestMainAnalysisError = error.message;
+    await send(`âŒ Command ${command} failed\n${error.message}`);
+  }
+}
+
+async function pollTelegramCommands() {
+  if (telegramPollingRunning || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  telegramPollingRunning = true;
+  telegramLastPollAt = new Date().toISOString();
+  try {
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=${telegramUpdateOffset}&timeout=0&allowed_updates=${encodeURIComponent(JSON.stringify(["message"]))}`;
+    const response = await fetch(url);
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.description || "Telegram getUpdates failed");
+
+    for (const update of data.result || []) {
+      telegramUpdateOffset = Math.max(telegramUpdateOffset, Number(update.update_id) + 1);
+      await handleTelegramCommand(update.message);
+    }
+    telegramLastPollError = null;
+  } catch (error) {
+    telegramLastPollError = error.message;
+    console.log("Telegram command polling error:", error.message);
+  } finally {
+    telegramPollingRunning = false;
+  }
+}
+
+async function telegramCommandLoop() {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  await pollTelegramCommands();
+  telegramPollingTimer = setTimeout(telegramCommandLoop, 3000);
+}
+
+telegramCommandLoop();
 
 /* =========================================================
    ROOT
@@ -4594,6 +4868,7 @@ app.get(
         "/trendline-monitor-status"
       ],
       trendlineMonitor: {
+        enabled: trendlineMonitorEnabled,
         intervalSeconds: 60,
         running: trendlineMonitorRunning,
         lastStartedAt: lastTrendlineMonitorStartedAt,
@@ -4606,6 +4881,13 @@ app.get(
         lastAlertKey: lastTrendlineAlertKey,
         activeTrades: Object.fromEntries([...activeTrendlineTrades].map(([tf,v]) => [tf,v])),
         lastDangerAlerts: Object.fromEntries([...lastDangerAlertResults].map(([tf,v]) => [tf,v]))
+      },
+      telegramCommands: {
+        enabled: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
+        authorizedChatIdConfigured: !!TELEGRAM_CHAT_ID,
+        pollingRunning: telegramPollingRunning,
+        lastPollAt: telegramLastPollAt,
+        lastPollError: telegramLastPollError
       }
     });
   }
@@ -4623,6 +4905,7 @@ app.get(
       success: true,
       instrument: OUTPUT_SYMBOL,
       monitor: {
+        enabled: trendlineMonitorEnabled,
         intervalSeconds: 60,
         running: trendlineMonitorRunning,
         lastStartedAt: lastTrendlineMonitorStartedAt,
@@ -4836,6 +5119,13 @@ app.get(
           mtf
         );
 
+      latestMainAnalysis = {
+        ...mtf,
+        AI_ANALYSIS: ai
+      };
+      latestMainAnalysisAt = new Date().toISOString();
+      latestMainAnalysisError = null;
+
       let telegram =
         null;
 
@@ -4886,7 +5176,7 @@ app.get(
 
           if (trendlineTelegram?.sent) {
             TRENDLINE_ALERT_STATE.set(
-              `XAUUSD:${signal?.signalTimeframe || "5M"}`,
+              `XAUUSD:${trendlineSignal?.signalTimeframe || "5M"}`,
               key
             );
           }
