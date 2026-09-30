@@ -2972,115 +2972,88 @@ function trendlineAnalysis(candles1H, candles15M, candles5M) {
 
   const bullishScoreData=trendlineScoreForDirection("BUY",trendlines["1H"],trendlines["15M"],trendlines["5M"],a1,a15,a5);
   const bearishScoreData=trendlineScoreForDirection("SELL",trendlines["1H"],trendlines["15M"],trendlines["5M"],a1,a15,a5);
+
   const analyses={"1H":a1,"15M":a15,"5M":a5};
   const independentSignals={};
   const independentLevels={};
-  const timeframeState={};
-
-  function classify(candidate, levels) {
-    if (!candidate) return {status:"WAITING", lifecycle:"WAITING", ready:false};
-    if (candidate.ready && levels) return {status:candidate.score>=9?"STRONG CONFIRMED":"CONFIRMED", lifecycle:"CONFIRMED", ready:true};
-    const developing = !!(candidate.structureAligned || candidate.momentumAligned || candidate.candleAligned || candidate.score>=5);
-    return developing ? {status:"DEVELOPING", lifecycle:"DEVELOPING", ready:false} : {status:"WAITING", lifecycle:"WAITING", ready:false};
-  }
-
   for (const tf of ["1H","15M","5M"]) {
     independentSignals[tf]={};
     independentLevels[tf]={};
     for (const direction of ["BUY","SELL"]) {
       const candidate=buildIndependentTrendlineTradeSignal(direction,tf,analyses[tf],trendlines[tf]);
-      let levels=candidate?.ready ? buildTrendlineTradeLevels(direction,a1,a15,a5,trendlines[tf],tf) : null;
-      if (candidate?.ready && !levels) candidate.ready=false;
-      const state=classify(candidate,levels);
-      if (candidate) {
-        candidate.lifecycle=state.lifecycle;
-        candidate.status=state.status;
-        candidate.levelsAvailable=!!levels;
-      }
       independentSignals[tf][direction]=candidate;
-      independentLevels[tf][direction]=levels;
+      independentLevels[tf][direction]=candidate?.ready ? buildTrendlineTradeLevels(direction,a1,a15,a5,trendlines[tf],tf) : null;
+      if (independentSignals[tf][direction]?.ready && !independentLevels[tf][direction]) independentSignals[tf][direction].ready=false;
     }
-
-    const b=independentSignals[tf].BUY, s=independentSignals[tf].SELL;
-    let selectedSignal=null, selectedLevels=null, selectedTrend=null;
-    if (b?.ready && (!s?.ready || b.score>s.score)) { selectedSignal=b; selectedLevels=independentLevels[tf].BUY; selectedTrend=trendlines[tf].bullish; }
-    else if (s?.ready && (!b?.ready || s.score>b.score)) { selectedSignal=s; selectedLevels=independentLevels[tf].SELL; selectedTrend=trendlines[tf].bearish; }
-
-    const best=b?.score ?? 0 > (s?.score ?? 0) ? b : s;
-    const developing=(b?.score??0)>=(s?.score??0) ? b : s;
-    timeframeState[tf]={
-      status:selectedSignal?selectedSignal.status:(developing?.lifecycle||"WAITING"),
-      lifecycle:selectedSignal?selectedSignal.lifecycle:(developing?.lifecycle||"WAITING"),
-      direction:selectedSignal?.direction||"None",
-      score:selectedSignal?.score??developing?.score??0,
-      confirmationGrade:selectedSignal?.score>=9?"STRONG":selectedSignal?.score>=7?"CONFIRMED":developing?.score>=5?"WATCH":"NONE",
-      ready:!!selectedSignal,
-      entry:selectedLevels?.entry??null,
-      stopLoss:selectedLevels?.stopLoss??null,
-      TP1:selectedLevels?.takeProfit?.TP1??null,
-      TP2:selectedLevels?.takeProfit?.TP2??null,
-      TP3:selectedLevels?.takeProfit?.TP3??null,
-      reasons:selectedSignal?.reasons??developing?.reasons??[],
-      warnings:selectedSignal?.warnings??developing?.warnings??[]
-    };
   }
 
-  const selected={};
-  for (const tf of ["1H","15M","5M"]) {
+  function select(tf) {
     const b=independentSignals[tf].BUY, s=independentSignals[tf].SELL;
-    if (b?.ready && (!s?.ready || b.score>s.score)) selected[tf]={signal:b,levels:independentLevels[tf].BUY,trend:trendlines[tf].bullish};
-    else if (s?.ready && (!b?.ready || s.score>b.score)) selected[tf]={signal:s,levels:independentLevels[tf].SELL,trend:trendlines[tf].bearish};
-    else selected[tf]={signal:null,levels:null,trend:null};
+    if (b?.ready && (!s?.ready || b.score>s.score)) return {signal:b,levels:independentLevels[tf].BUY,trend:trendlines[tf].bullish};
+    if (s?.ready && (!b?.ready || s.score>b.score)) return {signal:s,levels:independentLevels[tf].SELL,trend:trendlines[tf].bearish};
+    return {signal:null,levels:null,trend:null};
   }
 
-  const readyTFs=["1H","15M","5M"].filter(tf=>selected[tf].signal);
-  const primary=readyTFs.length===1?selected[readyTFs[0]]:readyTFs.length>1?selected[readyTFs[0]]:null;
-  const primaryTF=readyTFs[0]||"None";
-  const topSignal=primary?.signal ? {
-    status:primary.signal.direction+" "+(primary.signal.score>=9?"STRONG CONFIRMED":"CONFIRMED"),
-    direction:primary.signal.direction, score:primary.signal.score, maxScore:11,
-    confirmationGrade:primary.signal.score>=9?"STRONG":"CONFIRMED", signalTimeframe:primaryTF,
-    independentTimeframeBreakouts:true, reasons:primary.signal.reasons,warnings:primary.signal.warnings,
-    retest:primary.trend?.retest??null,noRetestPath:!!(primary.trend?.continuation&&!primary.trend?.retest?.held),
-    timeframeStatuses:timeframeState
-  } : {
-    status:"WAITING", direction:"None",
-    score:Math.max(...["1H","15M","5M"].map(tf=>timeframeState[tf].score)), maxScore:11,
-    confirmationGrade:"NONE", signalTimeframe:primaryTF, independentTimeframeBreakouts:true,
-    reasons:["No independent timeframe trade is currently confirmed"], warnings:[], timeframeStatuses:timeframeState
-  };
+  const selected={"1H":select("1H"),"15M":select("15M"),"5M":select("5M")};
+  const primary=selected["5M"];
+  const signal=primary.signal ? {
+    status:primary.signal.direction+" "+(primary.signal.score>=9?"STRONG CONFIRMED":"CONFIRMED"), direction:primary.signal.direction, score:primary.signal.score, maxScore:11,
+    confirmationGrade:primary.signal.score>=9?"STRONG":primary.signal.score>=7?"CONFIRMED":primary.signal.score>=5?"WATCH":"NONE", signalTimeframe:"5M", independentTimeframeBreakouts:true,
+    reasons:primary.signal.reasons,warnings:primary.signal.warnings,retest:primary.trend?.retest??null,noRetestPath:!!(primary.trend?.continuation&&!primary.trend?.retest?.held),
+    higherTimeframeContext:{"1H":trendlines["1H"].bullish.confirmed?"Bullish Breakout":trendlines["1H"].bearish.confirmed?"Bearish Breakdown":"No Confirmed Break","15M":trendlines["15M"].bullish.confirmed?"Bullish Breakout":trendlines["15M"].bearish.confirmed?"Bearish Breakdown":"No Confirmed Break"}
+  } : {status:"WAITING",direction:"None",score:Math.max(...["1H","15M","5M"].flatMap(tf=>[independentSignals[tf].BUY?.score??0,independentSignals[tf].SELL?.score??0])),maxScore:11,confirmationGrade:"NONE",signalTimeframe:"5M",independentTimeframeBreakouts:true,reasons:["Waiting for independent timeframe trade setup"],warnings:[]};
 
-  return {
-    success:true,instrument:OUTPUT_SYMBOL,generatedAt:new Date().toISOString(),currentPrice:a5.currentPrice,
-    TRENDLINE_SIGNAL:topSignal,
-    TRENDLINE_SCORE:{BUY:{...bullishScoreData,independentTimeframeSignals:independentSignals},SELL:{...bearishScoreData,independentTimeframeSignals:independentSignals}},
-    TRENDLINES:trendlines,
-    TRADE_LEVELS:primary?.levels||null,
+  return {success:true,instrument:OUTPUT_SYMBOL,generatedAt:new Date().toISOString(),currentPrice:a5.currentPrice,TRENDLINE_SIGNAL:signal,TRENDLINE_SCORE:{BUY:{...bullishScoreData,independentTimeframeSignals:independentSignals},SELL:{...bearishScoreData,independentTimeframeSignals:independentSignals}},TRENDLINES:trendlines,
+    TRADE_LEVELS:primary.levels,
     INDEPENDENT_TRADE_SIGNALS:{
-      "1H":{signal:selected["1H"].signal,levels:selected["1H"].levels,state:timeframeState["1H"]},
-      "15M":{signal:selected["15M"].signal,levels:selected["15M"].levels,state:timeframeState["15M"]},
-      "5M":{signal:selected["5M"].signal,levels:selected["5M"].levels,state:timeframeState["5M"]}
+      "1H":{signal:selected["1H"].signal,levels:selected["1H"].levels},
+      "15M":{signal:selected["15M"].signal,levels:selected["15M"].levels},
+      "5M":{signal:selected["5M"].signal,levels:selected["5M"].levels}
     },
-    analysis:analyses
-  };
+    analysis:analyses};
 }
 
 function buildTrendlineTelegramMessage(result) {
-  const signal=result?.TRENDLINE_SIGNAL||{};
-  let message=`XAUUSD INDEPENDENT TRENDLINE ALERT\n\nPrice: ${result?.currentPrice??"N/A"}\n\n`;
-  for (const tf of ["1H","15M","5M"]) {
-    const item=result?.INDEPENDENT_TRADE_SIGNALS?.[tf]||{};
-    const s=item.signal||{};
-    const l=item.levels||{};
-    const state=item.state||{};
-    message+=`${tf}: ${state.status||"WAITING"} | ${s.direction||state.direction||"None"} | Score ${s.score??state.score??0}/11\n`;
-    if(l.entry) message+=`Entry: ${l.entry} | SL: ${l.stopLoss} | TP1: ${l.takeProfit?.TP1??"N/A"} | TP2: ${l.takeProfit?.TP2??"N/A"} | TP3: ${l.takeProfit?.TP3??"N/A"}\n`;
-    if(state.reasons?.length) message+=`Confirmations: ${state.reasons.slice(0,5).join("; ")}\n`;
-    if(state.warnings?.length) message+=`Warnings: ${state.warnings.slice(0,4).join("; ")}\n`;
-    message+=`\n`;
+  const signal = result.TRENDLINE_SIGNAL || {};
+  const levels = result.TRADE_LEVELS || {};
+
+  let message =
+    `XAUUSD TRENDLINE ALERT\n\n` +
+    `Status: ${signal.status || "WAITING"}\n` +
+    `Direction: ${signal.direction || "None"}\n` +
+    `Score: ${signal.score ?? 0}/${signal.maxScore ?? 10}\n` +
+    `Grade: ${signal.confirmationGrade || "NONE"}\n` +
+    `Price: ${result.currentPrice ?? "N/A"}\n\n` +
+    `1H Trendline: ${result.TRENDLINES?.["1H"]?.bullish?.confirmed ? "Bullish Breakout" : result.TRENDLINES?.["1H"]?.bearish?.confirmed ? "Bearish Breakdown" : "No Confirmed Break"}\n` +
+    `15M: ${result.TRENDLINES?.["15M"]?.bullish?.confirmed ? "Bullish Confirm" : result.TRENDLINES?.["15M"]?.bearish?.confirmed ? "Bearish Confirm" : "No Confirmed Break"}\n` +
+    `5M: ${result.TRENDLINES?.["5M"]?.bullish?.confirmed ? "Bullish Trigger" : result.TRENDLINES?.["5M"]?.bearish?.confirmed ? "Bearish Trigger" : "Continuation/No Retest"}\n` +
+    `Retest: ${signal.retest?.held ? "YES - HELD" : signal.noRetestPath ? "NO - Strong Continuation" : "NO"}\n`;
+
+  if (levels?.entry) {
+    message +=
+      `\nTRADE LEVELS\n` +
+      `Entry: ${levels.entry}\n` +
+      `SL: ${levels.stopLoss}\n` +
+      `TP1: ${levels.takeProfit?.TP1 ?? "N/A"}\n` +
+      `TP2: ${levels.takeProfit?.TP2 ?? "N/A"}\n` +
+      `TP3: ${levels.takeProfit?.TP3 ?? "N/A"}\n` +
+      `Target: ${levels.targetMethod || "Trendline / Structure"}\n`;
   }
-  if(signal.direction && signal.direction!=="None") message+=`Primary confirmed timeframe: ${signal.signalTimeframe}\n`;
-  message+=`Independent timeframes: YES\n`;
+
+  if (signal.reasons?.length) {
+    message +=
+      `\nCONFIRMATIONS\n` +
+      signal.reasons.slice(0, 8).map(x => `â€¢ ${x}`).join("\n") +
+      "\n";
+  }
+
+  if (signal.warnings?.length) {
+    message +=
+      `\nWARNINGS\n` +
+      signal.warnings.slice(0, 6).map(x => `â€¢ ${x}`).join("\n") +
+      "\n";
+  }
+
   return message;
 }
 
@@ -4502,7 +4475,6 @@ let lastTrendlineAlertKey = null;
 const activeTrendlineTrades = new Map();
 const lastDangerAlertKeys = new Map();
 const lastDangerAlertResults = new Map();
-const trendlineSignalLifecycle = new Map();
 
 function getOppositeDangerForTimeframe(result, timeframe) {
   const activeTrade = activeTrendlineTrades.get(timeframe);
@@ -4564,32 +4536,18 @@ async function monitorTrendlineSignal() {
         if(telegram?.sent){lastDangerAlertKeys.set(tf,danger.key);console.log("Opposite-trade danger alert sent:",danger.key);}
       }
 
-      if (danger.danger) {
-        trendlineSignalLifecycle.set(tf, danger.level === "CRITICAL" ? "CRITICAL" : "DANGER");
-      } else if (eligible) {
-        trendlineSignalLifecycle.set(tf, "CONFIRMED");
-      } else if (signal.lifecycle === "DEVELOPING") {
-        trendlineSignalLifecycle.set(tf, "DEVELOPING");
-      } else {
-        trendlineSignalLifecycle.set(tf, "WAITING");
-      }
-
       if(eligible&&key&&previousKey!==key){
         const telegram=await sendTelegramMessage(buildTrendlineTelegramMessage({...result,TRENDLINE_SIGNAL:{...signal,signalTimeframe:tf},TRADE_LEVELS:levels}));
         lastTrendlineTelegramResult={...telegram,attemptedAt:new Date().toISOString(),alertKey:key,timeframe:tf};
         if(telegram?.sent){
           TRENDLINE_ALERT_STATE.set(stateKey,key); lastTrendlineAlertKey=key;
           activeTrendlineTrades.set(tf,{timeframe:tf,direction:signal.direction,entry:levels.entry,stopLoss:levels.stopLoss,takeProfit:levels.takeProfit||null,alertKey:key,startedAt:new Date().toISOString()});
-          trendlineSignalLifecycle.set(tf,"ACTIVE");
           lastDangerAlertKeys.delete(tf); lastDangerAlertResults.delete(tf);
           console.log(`Independent ${tf} Trendline entry alert sent:`,key);
         }
       }
     }
 
-    for (const tf of ["1H","15M","5M"]) {
-      perTf[tf].lifecycle=trendlineSignalLifecycle.get(tf)||"WAITING";
-    }
     lastTrendlineMonitorDecision={eligible:Object.values(perTf).some(x=>x.eligible),independentTimeframes:perTf};
     lastTrendlineMonitorError=null;
   } catch(error){
@@ -4798,25 +4756,67 @@ app.get(
   "/trendline-analysis",
   async (req, res) => {
     try {
-      const [candles1H,candles15M,candles5M]=await Promise.all([
-        getCandles(TF["1H"],350),getCandles(TF["15M"],350),getCandles(TF["5M"],350)
+      const [
+        candles1H,
+        candles15M,
+        candles5M
+      ] = await Promise.all([
+        getCandles(TF["1H"], 350),
+        getCandles(TF["15M"], 350),
+        getCandles(TF["5M"], 350)
       ]);
-      const result=trendlineAnalysis(candles1H,candles15M,candles5M);
-      const telegrams={};
-      for(const tf of ["1H","15M","5M"]){
-        const item=result.INDEPENDENT_TRADE_SIGNALS?.[tf]||{};
-        const signal=item.signal||{}; const levels=item.levels||{};
-        if(signal.ready&&signal.direction&&levels.entry&&levels.stopLoss&&levels.takeProfit?.TP1){
-          const key=trendlineAlertKey(result,tf); const stateKey=`XAUUSD:${tf}`;
-          if(key&&TRENDLINE_ALERT_STATE.get(stateKey)!==key){
-            const tg=await sendTelegramMessage(buildTrendlineTelegramMessage({...result,TRENDLINE_SIGNAL:{...signal,signalTimeframe:tf}}));
-            telegrams[tf]=tg;
-            if(tg?.sent) TRENDLINE_ALERT_STATE.set(stateKey,key);
-          } else telegrams[tf]={sent:false,reason:"Duplicate independent Trendline signal suppressed"};
-        } else telegrams[tf]={sent:false,reason:"No confirmed independent trade setup"};
+
+      const result = trendlineAnalysis(
+        candles1H,
+        candles15M,
+        candles5M
+      );
+
+      let telegram = null;
+      const signal = result.TRENDLINE_SIGNAL;
+
+      if (
+        signal?.direction &&
+        signal.direction !== "None" &&
+        signal.score >= 7 &&
+        result.TRADE_LEVELS?.entry &&
+        result.TRADE_LEVELS?.stopLoss &&
+        result.TRADE_LEVELS?.takeProfit?.TP1
+      ) {
+        const key = trendlineAlertKey(result);
+
+        if (
+          key &&
+          TRENDLINE_ALERT_STATE.get(`XAUUSD:${signal?.signalTimeframe || "5M"}`) !== key
+        ) {
+          telegram = await sendTelegramMessage(
+            buildTrendlineTelegramMessage(result)
+          );
+
+          if (telegram?.sent) {
+            TRENDLINE_ALERT_STATE.set(
+              `XAUUSD:${signal?.signalTimeframe || "5M"}`,
+              key
+            );
+          }
+        } else {
+          telegram = {
+            sent: false,
+            reason: "Duplicate Trendline signal suppressed"
+          };
+        }
       }
-      res.json({...result,TRENDLINE_TELEGRAM:telegrams});
-    } catch(error){res.status(500).json({success:false,error:error.message});}
+
+      res.json({
+        ...result,
+        TRENDLINE_TELEGRAM: telegram
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
   }
 );
 
@@ -4856,21 +4856,46 @@ app.get(
           );
       }
 
-      let trendlineTelegram = {};
-      const trendlineResult = mtf.TRENDLINE_ANALYSIS;
-      for (const tf of ["1H","15M","5M"]) {
-        const item = trendlineResult?.INDEPENDENT_TRADE_SIGNALS?.[tf] || {};
-        const sig = item.signal || {};
-        const levels = item.levels || {};
-        if (sig.ready && levels.entry && levels.stopLoss && levels.takeProfit?.TP1) {
-          const key = trendlineAlertKey(trendlineResult, tf);
-          const stateKey = `XAUUSD:${tf}`;
-          if (key && TRENDLINE_ALERT_STATE.get(stateKey) !== key) {
-            const tg = await sendTelegramMessage(buildTrendlineTelegramMessage({...trendlineResult,TRENDLINE_SIGNAL:{...sig,signalTimeframe:tf}}));
-            trendlineTelegram[tf] = tg;
-            if (tg?.sent) TRENDLINE_ALERT_STATE.set(stateKey,key);
-          } else trendlineTelegram[tf] = {sent:false,reason:"Duplicate independent Trendline signal suppressed"};
-        } else trendlineTelegram[tf] = {sent:false,reason:"No confirmed independent trade setup"};
+      let trendlineTelegram = null;
+      const trendlineResult =
+        mtf.TRENDLINE_ANALYSIS;
+      const trendlineSignal =
+        trendlineResult?.TRENDLINE_SIGNAL;
+
+      if (
+        trendlineSignal?.direction &&
+        trendlineSignal.direction !== "None" &&
+        trendlineSignal.score >= 7
+      ) {
+        const key = trendlineAlertKey(
+          trendlineResult
+        );
+
+        if (
+          key &&
+          TRENDLINE_ALERT_STATE.get(
+            `XAUUSD:${trendlineSignal?.signalTimeframe || "5M"}`
+          ) !== key
+        ) {
+          trendlineTelegram =
+            await sendTelegramMessage(
+              buildTrendlineTelegramMessage(
+                trendlineResult
+              )
+            );
+
+          if (trendlineTelegram?.sent) {
+            TRENDLINE_ALERT_STATE.set(
+              `XAUUSD:${signal?.signalTimeframe || "5M"}`,
+              key
+            );
+          }
+        } else {
+          trendlineTelegram = {
+            sent: false,
+            reason: "Duplicate Trendline signal suppressed"
+          };
+        }
       }
 
       res.json({
