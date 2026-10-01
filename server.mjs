@@ -3,13 +3,17 @@ import express from "express";
 const app = express();
 app.use(express.json());
 
-// CORS: Liquid Chart / MyTrader runs in the browser and must be able
-// to read the execution-signal response from Render.
+// =========================================================
+// HF EXECUTION CORS
+// MyTrader/Liquid Chart scripts run in a browser worker.
+// These headers explicitly allow the external XAUUSD executor.
+// =========================================================
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-HF-Secret");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
+  res.setHeader("Access-Control-Max-Age", "86400");
+  if (req.method === "OPTIONS") return res.status(204).end();
   next();
 });
 
@@ -4643,7 +4647,10 @@ app.get(
         "/gemini-test",
         "/telegram-test",
         "/trendline-analysis",
-        "/trendline-monitor-status"
+        "/trendline-monitor-status",
+        "/hf/status",
+        "/hf/decision",
+        "/hf/tick"
       ],
       trendlineMonitor: {
         intervalSeconds: 60,
@@ -4976,264 +4983,144 @@ app.get(
 );
 
 /* =========================================================
-   HIGH-FREQUENCY EXECUTION BRIDGE
-   Render = decision brain; Liquid Chart = execution arm.
-
-   IMPORTANT:
-   - AUTO_TRADE is OFF by default.
-   - The endpoint is intentionally fast and does NOT call the LLM on every tick.
-   - MTF/AI context is refreshed in the background and cached.
+   HIGH-FREQUENCY XAUUSD EXECUTION BRIDGE
+   Liquid Chart -> /hf/tick -> cached MTF decision
 ========================================================= */
 
-const HF_AUTO_TRADE =
-  String(process.env.AUTO_TRADE || "false").toLowerCase() === "true";
-
-const HF_SECRET =
-  process.env.HF_SECRET || "";
-
-const HF_CONFIG = {
-  tickHistoryMs: 6000,
-  refreshMtfMs: 8000,
-  refreshAiMs: 30000,
-  minMove: num(process.env.HF_MIN_MOVE, 0.12),
-  strongMove: num(process.env.HF_STRONG_MOVE, 0.28),
-  maxSpread: num(process.env.HF_MAX_SPREAD, 0.35),
-  minHoldMs: num(process.env.HF_MIN_HOLD_MS, 1500),
-  cooldownMs: num(process.env.HF_COOLDOWN_MS, 1800),
-  slPips: num(process.env.HF_SL_PIPS, 80),
-  tpPips: num(process.env.HF_TP_PIPS, 55),
-  bePips: num(process.env.HF_BE_PIPS, 30),
-  trailPips: num(process.env.HF_TRAIL_PIPS, 25)
+const HF_AUTO_TRADE = String(process.env.AUTO_TRADE || "false").toLowerCase() === "true";
+const HF_SECRET = process.env.HF_SECRET || "";
+const HF_STATE = {
+  ticks: 0,
+  lastTickAt: null,
+  lastBid: null,
+  lastAsk: null,
+  lastDecision: null,
+  lastDecisionAt: null,
+  lastError: null,
+  decisionRunning: false
 };
 
-const hfTicks = [];
-let hfMtfCache = null;
-let hfMtfUpdatedAt = 0;
-let hfAiCache = null;
-let hfAiUpdatedAt = 0;
-let hfLastDecision = null;
-let hfLastSignalKey = null;
-let hfLastSignalAt = 0;
-let hfRefreshRunning = false;
+let hfCachedDecision = null;
+let hfCachedDecisionAt = 0;
+const HF_DECISION_CACHE_MS = 1200;
 
 function hfAuthorized(req) {
   if (!HF_SECRET) return true;
-  return String(req.get("X-HF-Secret") || "") === HF_SECRET;
+  return String(req.headers["x-hf-secret"] || "") === HF_SECRET;
 }
 
-function hfPushTick(bid, ask) {
-  const b = num(bid);
-  const a = num(ask);
-  if (!Number.isFinite(b) || !Number.isFinite(a) || b <= 0 || a <= 0) return null;
-
+async function buildHFDecision(bid, ask) {
   const now = Date.now();
-  const mid = (b + a) / 2;
-  hfTicks.push({ t: now, bid: b, ask: a, mid });
-
-  const cutoff = now - HF_CONFIG.tickHistoryMs;
-  while (hfTicks.length && hfTicks[0].t < cutoff) hfTicks.shift();
-
-  return hfTicks[hfTicks.length - 1];
-}
-
-function hfMoveFrom(ms) {
-  if (hfTicks.length < 2) return 0;
-  const now = Date.now();
-  const target = now - ms;
-  let base = hfTicks[0];
-  for (let i = hfTicks.length - 1; i >= 0; i--) {
-    if (hfTicks[i].t <= target) {
-      base = hfTicks[i];
-      break;
-    }
+  if (hfCachedDecision && now - hfCachedDecisionAt < HF_DECISION_CACHE_MS) {
+    return {
+      ...hfCachedDecision,
+      currentPrice: Number.isFinite(bid) && Number.isFinite(ask)
+        ? (bid + ask) / 2
+        : hfCachedDecision.currentPrice,
+      cached: true
+    };
   }
-  return hfTicks[hfTicks.length - 1].mid - base.mid;
-}
 
-function hfEngineDirection(mtf) {
-  const entry = mtf?.ENTRY_CONFIRMATION || {};
-  if (entry.status === "BUY CONFIRMED") return "BUY";
-  if (entry.status === "SELL CONFIRMED") return "SELL";
+  if (HF_STATE.decisionRunning && hfCachedDecision) {
+    return {...hfCachedDecision, cached: true, busy: true};
+  }
 
-  const per = mtf?.TRENDLINE_ANALYSIS?.INDEPENDENT_TRADE_SIGNALS || {};
-  const ready = Object.values(per)
-    .map(x => x?.signal || {})
-    .filter(x => x.ready && (x.direction === "BUY" || x.direction === "SELL"))
-    .sort((a, b) => (b.score || 0) - (a.score || 0));
-
-  if (ready[0]?.score >= 7) return ready[0].direction;
-  return "NONE";
-}
-
-function hfMtfAgreement(mtf, direction) {
-  if (!mtf || direction === "NONE") return false;
-  const align = String(mtf?.MTF?.alignment || "");
-  if (direction === "BUY" && /Bullish/i.test(align)) return true;
-  if (direction === "SELL" && /Bearish/i.test(align)) return true;
-  return false;
-}
-
-async function hfRefreshContext(force = false) {
-  const now = Date.now();
-  if (hfRefreshRunning) return;
-  if (!force && now - hfMtfUpdatedAt < HF_CONFIG.refreshMtfMs) return;
-
-  hfRefreshRunning = true;
+  HF_STATE.decisionRunning = true;
   try {
-    hfMtfCache = await mtfAnalysis();
-    hfMtfUpdatedAt = Date.now();
+    const mtf = await mtfAnalysis();
+    const entry = mtf?.ENTRY_CONFIRMATION || {};
+    const levels = mtf?.TRADE_LEVELS || null;
+    const direction = entry.direction === "BUY" || entry.direction === "SELL"
+      ? entry.direction
+      : "WAIT";
 
-    if (Date.now() - hfAiUpdatedAt >= HF_CONFIG.refreshAiMs) {
-      // AI text is contextual only; the fast execution decision remains numeric/deterministic.
-      try {
-        hfAiCache = await geminiAnalysis(hfMtfCache);
-      } catch (e) {
-        hfAiCache = { available: false, error: e.message };
-      }
-      hfAiUpdatedAt = Date.now();
-    }
-  } catch (e) {
-    hfMtfCache = hfMtfCache || null;
+    // Only the deterministic engine's confirmed signal can trigger execution.
+    // AI analysis remains available through /analyze and Telegram and does not
+    // get allowed to invent an order direction.
+    const decision = {
+      success: true,
+      instrument: "XAUUSD",
+      generatedAt: new Date().toISOString(),
+      currentPrice: Number.isFinite(bid) && Number.isFinite(ask) ? (bid + ask) / 2 : null,
+      bid: Number.isFinite(bid) ? bid : null,
+      ask: Number.isFinite(ask) ? ask : null,
+      signal: direction,
+      status: entry.status || "WAITING",
+      bullishScore: entry.bullishScore ?? 0,
+      bearishScore: entry.bearishScore ?? 0,
+      reasons: direction === "BUY" ? (entry.bullishReasons || []) : direction === "SELL" ? (entry.bearishReasons || []) : [],
+      tradeLevels: levels,
+      autoTrade: HF_AUTO_TRADE,
+      executionAllowed: HF_AUTO_TRADE && (direction === "BUY" || direction === "SELL"),
+      mtf: mtf.MTF || null,
+      structure: mtf.MTF_STRUCTURE || null,
+      confirmation: mtf.MTF_CONFIRMATION || null,
+      liquidity: mtf.analysis?.["5M"]?.liquidity || null,
+      fvg: mtf.analysis?.["5M"]?.FVG || null,
+      orderBlocks: mtf.analysis?.["5M"]?.orderBlocks || null,
+      candle: mtf.analysis?.["5M"]?.candle || null,
+      trendline: mtf.TRENDLINE_ANALYSIS || null
+    };
+
+    hfCachedDecision = decision;
+    hfCachedDecisionAt = Date.now();
+    HF_STATE.lastDecision = decision;
+    HF_STATE.lastDecisionAt = new Date().toISOString();
+    HF_STATE.lastError = null;
+    return decision;
+  } catch (error) {
+    HF_STATE.lastError = error.message;
+    if (hfCachedDecision) return {...hfCachedDecision, stale: true, error: error.message};
+    return {
+      success: false,
+      instrument: "XAUUSD",
+      signal: "WAIT",
+      executionAllowed: false,
+      error: error.message
+    };
   } finally {
-    hfRefreshRunning = false;
+    HF_STATE.decisionRunning = false;
   }
 }
-
-function hfDecision(bid, ask) {
-  const latest = hfTicks[hfTicks.length - 1];
-  if (!latest) return { action: "WAIT", reason: "NO_LIVE_PRICE" };
-
-  const spread = ask - bid;
-  const move1 = hfMoveFrom(1000);
-  const move3 = hfMoveFrom(3000);
-  const acceleration = move1 - (move3 / 3);
-  const engineDir = hfEngineDirection(hfMtfCache);
-  const agreement = hfMtfAgreement(hfMtfCache, engineDir);
-
-  let momentumDir = "NONE";
-  if (move1 >= HF_CONFIG.minMove && acceleration >= 0) momentumDir = "BUY";
-  if (move1 <= -HF_CONFIG.minMove && acceleration <= 0) momentumDir = "SELL";
-
-  let action = "WAIT";
-  let reason = "NO_MOMENTUM";
-  let confidence = 0;
-
-  if (spread > HF_CONFIG.maxSpread) {
-    reason = "SPREAD_TOO_WIDE";
-  } else if (momentumDir === "NONE") {
-    reason = "WAITING_FOR_MOMENTUM";
-  } else {
-    const strong = Math.abs(move1) >= HF_CONFIG.strongMove;
-
-    if (engineDir === momentumDir && agreement) {
-      action = momentumDir;
-      confidence = strong ? 90 : 78;
-      reason = "MOMENTUM_PLUS_RENDER_MTF_CONFIRMATION";
-    } else if (engineDir === "NONE" && strong) {
-      action = momentumDir;
-      confidence = 68;
-      reason = "STRONG_LIVE_MOMENTUM_WITHOUT_CONFLICT";
-    } else {
-      reason = "MOMENTUM_CONFLICTS_WITH_RENDER_CONTEXT";
-    }
-  }
-
-  const signalKey = `${action}:${Math.round(latest.mid * 100)}:${engineDir}`;
-  const now = Date.now();
-  const duplicate = action !== "WAIT" && signalKey === hfLastSignalKey && now - hfLastSignalAt < HF_CONFIG.cooldownMs;
-
-  if (duplicate) {
-    action = "WAIT";
-    reason = "DUPLICATE_SIGNAL_COOLDOWN";
-  } else if (action !== "WAIT") {
-    hfLastSignalKey = signalKey;
-    hfLastSignalAt = now;
-  }
-
-  const out = {
-    success: true,
-    instrument: OUTPUT_SYMBOL,
-    action,
-    executionAllowed: HF_AUTO_TRADE,
-    confidence,
-    reason,
-    price: round(latest.mid, 5),
-    bid: round(bid, 5),
-    ask: round(ask, 5),
-    spread: round(spread, 5),
-    move1s: round(move1, 5),
-    move3s: round(move3, 5),
-    acceleration: round(acceleration, 5),
-    renderDirection: engineDir,
-    renderMtfAlignment: hfMtfCache?.MTF?.alignment || "Unknown",
-    renderEntryStatus: hfMtfCache?.ENTRY_CONFIRMATION?.status || "WAITING",
-    aiAvailable: !!hfAiCache?.available,
-    aiProvider: hfAiCache?.provider || null,
-    levels: {
-      slPips: HF_CONFIG.slPips,
-      tpPips: HF_CONFIG.tpPips,
-      bePips: HF_CONFIG.bePips,
-      trailPips: HF_CONFIG.trailPips
-    },
-    contextUpdatedAt: hfMtfUpdatedAt ? new Date(hfMtfUpdatedAt).toISOString() : null,
-    aiUpdatedAt: hfAiUpdatedAt ? new Date(hfAiUpdatedAt).toISOString() : null,
-    timestamp: new Date().toISOString()
-  };
-
-  hfLastDecision = out;
-  return out;
-}
-
-// Fast execution decision. Liquid Chart supplies the broker's live bid/ask.
-app.get("/hf/decision", async (req, res) => {
-  try {
-    if (!hfAuthorized(req)) return res.status(401).json({ success: false, error: "Unauthorized" });
-
-    const bid = num(req.query.bid);
-    const ask = num(req.query.ask);
-    if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
-      return res.status(400).json({ success: false, error: "bid and ask are required" });
-    }
-
-    hfPushTick(bid, ask);
-    await hfRefreshContext(false);
-    res.json(hfDecision(bid, ask));
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post("/hf/tick", async (req, res) => {
-  try {
-    if (!hfAuthorized(req)) return res.status(401).json({ success: false, error: "Unauthorized" });
-    const bid = num(req.body?.bid);
-    const ask = num(req.body?.ask);
-    if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
-      return res.status(400).json({ success: false, error: "bid and ask are required" });
-    }
-    hfPushTick(bid, ask);
-    await hfRefreshContext(false);
-    res.json(hfDecision(bid, ask));
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
 
 app.get("/hf/status", (req, res) => {
+  if (!hfAuthorized(req)) return res.status(401).json({success:false,error:"Unauthorized"});
   res.json({
     success: true,
-    instrument: OUTPUT_SYMBOL,
+    instrument: "XAUUSD",
     autoTrade: HF_AUTO_TRADE,
-    ticks: hfTicks.length,
-    mtfUpdatedAt: hfMtfUpdatedAt ? new Date(hfMtfUpdatedAt).toISOString() : null,
-    aiUpdatedAt: hfAiUpdatedAt ? new Date(hfAiUpdatedAt).toISOString() : null,
-    lastDecision: hfLastDecision
+    ticks: HF_STATE.ticks,
+    lastTickAt: HF_STATE.lastTickAt,
+    lastBid: HF_STATE.lastBid,
+    lastAsk: HF_STATE.lastAsk,
+    lastDecisionAt: HF_STATE.lastDecisionAt,
+    lastDecision: HF_STATE.lastDecision,
+    lastError: HF_STATE.lastError
   });
 });
 
-setInterval(() => {
-  hfRefreshContext(false).catch(() => {});
-}, 2000);
+app.post("/hf/tick", async (req, res) => {
+  if (!hfAuthorized(req)) return res.status(401).json({success:false,error:"Unauthorized"});
+  const bid = Number(req.body?.bid);
+  const ask = Number(req.body?.ask);
+  if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) {
+    return res.status(400).json({success:false,error:"Invalid bid/ask"});
+  }
+  HF_STATE.ticks++;
+  HF_STATE.lastTickAt = new Date().toISOString();
+  HF_STATE.lastBid = bid;
+  HF_STATE.lastAsk = ask;
+  const decision = await buildHFDecision(bid, ask);
+  res.json({success:true, tick:HF_STATE.ticks, decision});
+});
+
+app.get("/hf/decision", async (req, res) => {
+  if (!hfAuthorized(req)) return res.status(401).json({success:false,error:"Unauthorized"});
+  const bid = Number(req.query?.bid);
+  const ask = Number(req.query?.ask);
+  const decision = await buildHFDecision(bid, ask);
+  res.json(decision);
+});
 
 /* =========================================================
    SERVER
