@@ -3,6 +3,16 @@ import express from "express";
 const app = express();
 app.use(express.json());
 
+// CORS: Liquid Chart / MyTrader runs in the browser and must be able
+// to read the execution-signal response from Render.
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-HF-Secret");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 const PORT = process.env.PORT || 10000;
 
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
@@ -28,18 +38,6 @@ const TF = {
 const CACHE = new Map();
 const CACHE_MS = 15000;
 const TRENDLINE_ALERT_STATE = new Map();
-
-// Latest analysis cache used by Telegram commands.
-let latestMainAnalysis = null;
-let latestMainAnalysisAt = null;
-let latestMainAnalysisError = null;
-
-// Telegram command polling state. Only TELEGRAM_CHAT_ID is authorized.
-let telegramPollingRunning = false;
-let telegramUpdateOffset = 0;
-let telegramPollingTimer = null;
-let telegramLastPollAt = null;
-let telegramLastPollError = null;
 
 /* =========================================================
    BASIC HELPERS
@@ -2984,88 +2982,115 @@ function trendlineAnalysis(candles1H, candles15M, candles5M) {
 
   const bullishScoreData=trendlineScoreForDirection("BUY",trendlines["1H"],trendlines["15M"],trendlines["5M"],a1,a15,a5);
   const bearishScoreData=trendlineScoreForDirection("SELL",trendlines["1H"],trendlines["15M"],trendlines["5M"],a1,a15,a5);
-
   const analyses={"1H":a1,"15M":a15,"5M":a5};
   const independentSignals={};
   const independentLevels={};
+  const timeframeState={};
+
+  function classify(candidate, levels) {
+    if (!candidate) return {status:"WAITING", lifecycle:"WAITING", ready:false};
+    if (candidate.ready && levels) return {status:candidate.score>=9?"STRONG CONFIRMED":"CONFIRMED", lifecycle:"CONFIRMED", ready:true};
+    const developing = !!(candidate.structureAligned || candidate.momentumAligned || candidate.candleAligned || candidate.score>=5);
+    return developing ? {status:"DEVELOPING", lifecycle:"DEVELOPING", ready:false} : {status:"WAITING", lifecycle:"WAITING", ready:false};
+  }
+
   for (const tf of ["1H","15M","5M"]) {
     independentSignals[tf]={};
     independentLevels[tf]={};
     for (const direction of ["BUY","SELL"]) {
       const candidate=buildIndependentTrendlineTradeSignal(direction,tf,analyses[tf],trendlines[tf]);
+      let levels=candidate?.ready ? buildTrendlineTradeLevels(direction,a1,a15,a5,trendlines[tf],tf) : null;
+      if (candidate?.ready && !levels) candidate.ready=false;
+      const state=classify(candidate,levels);
+      if (candidate) {
+        candidate.lifecycle=state.lifecycle;
+        candidate.status=state.status;
+        candidate.levelsAvailable=!!levels;
+      }
       independentSignals[tf][direction]=candidate;
-      independentLevels[tf][direction]=candidate?.ready ? buildTrendlineTradeLevels(direction,a1,a15,a5,trendlines[tf],tf) : null;
-      if (independentSignals[tf][direction]?.ready && !independentLevels[tf][direction]) independentSignals[tf][direction].ready=false;
+      independentLevels[tf][direction]=levels;
     }
-  }
 
-  function select(tf) {
     const b=independentSignals[tf].BUY, s=independentSignals[tf].SELL;
-    if (b?.ready && (!s?.ready || b.score>s.score)) return {signal:b,levels:independentLevels[tf].BUY,trend:trendlines[tf].bullish};
-    if (s?.ready && (!b?.ready || s.score>b.score)) return {signal:s,levels:independentLevels[tf].SELL,trend:trendlines[tf].bearish};
-    return {signal:null,levels:null,trend:null};
+    let selectedSignal=null, selectedLevels=null, selectedTrend=null;
+    if (b?.ready && (!s?.ready || b.score>s.score)) { selectedSignal=b; selectedLevels=independentLevels[tf].BUY; selectedTrend=trendlines[tf].bullish; }
+    else if (s?.ready && (!b?.ready || s.score>b.score)) { selectedSignal=s; selectedLevels=independentLevels[tf].SELL; selectedTrend=trendlines[tf].bearish; }
+
+    const best=b?.score ?? 0 > (s?.score ?? 0) ? b : s;
+    const developing=(b?.score??0)>=(s?.score??0) ? b : s;
+    timeframeState[tf]={
+      status:selectedSignal?selectedSignal.status:(developing?.lifecycle||"WAITING"),
+      lifecycle:selectedSignal?selectedSignal.lifecycle:(developing?.lifecycle||"WAITING"),
+      direction:selectedSignal?.direction||"None",
+      score:selectedSignal?.score??developing?.score??0,
+      confirmationGrade:selectedSignal?.score>=9?"STRONG":selectedSignal?.score>=7?"CONFIRMED":developing?.score>=5?"WATCH":"NONE",
+      ready:!!selectedSignal,
+      entry:selectedLevels?.entry??null,
+      stopLoss:selectedLevels?.stopLoss??null,
+      TP1:selectedLevels?.takeProfit?.TP1??null,
+      TP2:selectedLevels?.takeProfit?.TP2??null,
+      TP3:selectedLevels?.takeProfit?.TP3??null,
+      reasons:selectedSignal?.reasons??developing?.reasons??[],
+      warnings:selectedSignal?.warnings??developing?.warnings??[]
+    };
   }
 
-  const selected={"1H":select("1H"),"15M":select("15M"),"5M":select("5M")};
-  const primary=selected["5M"];
-  const signal=primary.signal ? {
-    status:primary.signal.direction+" "+(primary.signal.score>=9?"STRONG CONFIRMED":"CONFIRMED"), direction:primary.signal.direction, score:primary.signal.score, maxScore:11,
-    confirmationGrade:primary.signal.score>=9?"STRONG":primary.signal.score>=7?"CONFIRMED":primary.signal.score>=5?"WATCH":"NONE", signalTimeframe:"5M", independentTimeframeBreakouts:true,
-    reasons:primary.signal.reasons,warnings:primary.signal.warnings,retest:primary.trend?.retest??null,noRetestPath:!!(primary.trend?.continuation&&!primary.trend?.retest?.held),
-    higherTimeframeContext:{"1H":trendlines["1H"].bullish.confirmed?"Bullish Breakout":trendlines["1H"].bearish.confirmed?"Bearish Breakdown":"No Confirmed Break","15M":trendlines["15M"].bullish.confirmed?"Bullish Breakout":trendlines["15M"].bearish.confirmed?"Bearish Breakdown":"No Confirmed Break"}
-  } : {status:"WAITING",direction:"None",score:Math.max(...["1H","15M","5M"].flatMap(tf=>[independentSignals[tf].BUY?.score??0,independentSignals[tf].SELL?.score??0])),maxScore:11,confirmationGrade:"NONE",signalTimeframe:"5M",independentTimeframeBreakouts:true,reasons:["Waiting for independent timeframe trade setup"],warnings:[]};
+  const selected={};
+  for (const tf of ["1H","15M","5M"]) {
+    const b=independentSignals[tf].BUY, s=independentSignals[tf].SELL;
+    if (b?.ready && (!s?.ready || b.score>s.score)) selected[tf]={signal:b,levels:independentLevels[tf].BUY,trend:trendlines[tf].bullish};
+    else if (s?.ready && (!b?.ready || s.score>b.score)) selected[tf]={signal:s,levels:independentLevels[tf].SELL,trend:trendlines[tf].bearish};
+    else selected[tf]={signal:null,levels:null,trend:null};
+  }
 
-  return {success:true,instrument:OUTPUT_SYMBOL,generatedAt:new Date().toISOString(),currentPrice:a5.currentPrice,TRENDLINE_SIGNAL:signal,TRENDLINE_SCORE:{BUY:{...bullishScoreData,independentTimeframeSignals:independentSignals},SELL:{...bearishScoreData,independentTimeframeSignals:independentSignals}},TRENDLINES:trendlines,
-    TRADE_LEVELS:primary.levels,
+  const readyTFs=["1H","15M","5M"].filter(tf=>selected[tf].signal);
+  const primary=readyTFs.length===1?selected[readyTFs[0]]:readyTFs.length>1?selected[readyTFs[0]]:null;
+  const primaryTF=readyTFs[0]||"None";
+  const topSignal=primary?.signal ? {
+    status:primary.signal.direction+" "+(primary.signal.score>=9?"STRONG CONFIRMED":"CONFIRMED"),
+    direction:primary.signal.direction, score:primary.signal.score, maxScore:11,
+    confirmationGrade:primary.signal.score>=9?"STRONG":"CONFIRMED", signalTimeframe:primaryTF,
+    independentTimeframeBreakouts:true, reasons:primary.signal.reasons,warnings:primary.signal.warnings,
+    retest:primary.trend?.retest??null,noRetestPath:!!(primary.trend?.continuation&&!primary.trend?.retest?.held),
+    timeframeStatuses:timeframeState
+  } : {
+    status:"WAITING", direction:"None",
+    score:Math.max(...["1H","15M","5M"].map(tf=>timeframeState[tf].score)), maxScore:11,
+    confirmationGrade:"NONE", signalTimeframe:primaryTF, independentTimeframeBreakouts:true,
+    reasons:["No independent timeframe trade is currently confirmed"], warnings:[], timeframeStatuses:timeframeState
+  };
+
+  return {
+    success:true,instrument:OUTPUT_SYMBOL,generatedAt:new Date().toISOString(),currentPrice:a5.currentPrice,
+    TRENDLINE_SIGNAL:topSignal,
+    TRENDLINE_SCORE:{BUY:{...bullishScoreData,independentTimeframeSignals:independentSignals},SELL:{...bearishScoreData,independentTimeframeSignals:independentSignals}},
+    TRENDLINES:trendlines,
+    TRADE_LEVELS:primary?.levels||null,
     INDEPENDENT_TRADE_SIGNALS:{
-      "1H":{signal:selected["1H"].signal,levels:selected["1H"].levels},
-      "15M":{signal:selected["15M"].signal,levels:selected["15M"].levels},
-      "5M":{signal:selected["5M"].signal,levels:selected["5M"].levels}
+      "1H":{signal:selected["1H"].signal,levels:selected["1H"].levels,state:timeframeState["1H"]},
+      "15M":{signal:selected["15M"].signal,levels:selected["15M"].levels,state:timeframeState["15M"]},
+      "5M":{signal:selected["5M"].signal,levels:selected["5M"].levels,state:timeframeState["5M"]}
     },
-    analysis:analyses};
+    analysis:analyses
+  };
 }
 
 function buildTrendlineTelegramMessage(result) {
-  const signal = result.TRENDLINE_SIGNAL || {};
-  const levels = result.TRADE_LEVELS || {};
-
-  let message =
-    `XAUUSD TRENDLINE ALERT\n\n` +
-    `Status: ${signal.status || "WAITING"}\n` +
-    `Direction: ${signal.direction || "None"}\n` +
-    `Score: ${signal.score ?? 0}/${signal.maxScore ?? 10}\n` +
-    `Grade: ${signal.confirmationGrade || "NONE"}\n` +
-    `Price: ${result.currentPrice ?? "N/A"}\n\n` +
-    `1H Trendline: ${result.TRENDLINES?.["1H"]?.bullish?.confirmed ? "Bullish Breakout" : result.TRENDLINES?.["1H"]?.bearish?.confirmed ? "Bearish Breakdown" : "No Confirmed Break"}\n` +
-    `15M: ${result.TRENDLINES?.["15M"]?.bullish?.confirmed ? "Bullish Confirm" : result.TRENDLINES?.["15M"]?.bearish?.confirmed ? "Bearish Confirm" : "No Confirmed Break"}\n` +
-    `5M: ${result.TRENDLINES?.["5M"]?.bullish?.confirmed ? "Bullish Trigger" : result.TRENDLINES?.["5M"]?.bearish?.confirmed ? "Bearish Trigger" : "Continuation/No Retest"}\n` +
-    `Retest: ${signal.retest?.held ? "YES - HELD" : signal.noRetestPath ? "NO - Strong Continuation" : "NO"}\n`;
-
-  if (levels?.entry) {
-    message +=
-      `\nTRADE LEVELS\n` +
-      `Entry: ${levels.entry}\n` +
-      `SL: ${levels.stopLoss}\n` +
-      `TP1: ${levels.takeProfit?.TP1 ?? "N/A"}\n` +
-      `TP2: ${levels.takeProfit?.TP2 ?? "N/A"}\n` +
-      `TP3: ${levels.takeProfit?.TP3 ?? "N/A"}\n` +
-      `Target: ${levels.targetMethod || "Trendline / Structure"}\n`;
+  const signal=result?.TRENDLINE_SIGNAL||{};
+  let message=`XAUUSD INDEPENDENT TRENDLINE ALERT\n\nPrice: ${result?.currentPrice??"N/A"}\n\n`;
+  for (const tf of ["1H","15M","5M"]) {
+    const item=result?.INDEPENDENT_TRADE_SIGNALS?.[tf]||{};
+    const s=item.signal||{};
+    const l=item.levels||{};
+    const state=item.state||{};
+    message+=`${tf}: ${state.status||"WAITING"} | ${s.direction||state.direction||"None"} | Score ${s.score??state.score??0}/11\n`;
+    if(l.entry) message+=`Entry: ${l.entry} | SL: ${l.stopLoss} | TP1: ${l.takeProfit?.TP1??"N/A"} | TP2: ${l.takeProfit?.TP2??"N/A"} | TP3: ${l.takeProfit?.TP3??"N/A"}\n`;
+    if(state.reasons?.length) message+=`Confirmations: ${state.reasons.slice(0,5).join("; ")}\n`;
+    if(state.warnings?.length) message+=`Warnings: ${state.warnings.slice(0,4).join("; ")}\n`;
+    message+=`\n`;
   }
-
-  if (signal.reasons?.length) {
-    message +=
-      `\nCONFIRMATIONS\n` +
-      signal.reasons.slice(0, 8).map(x => `â€¢ ${x}`).join("\n") +
-      "\n";
-  }
-
-  if (signal.warnings?.length) {
-    message +=
-      `\nWARNINGS\n` +
-      signal.warnings.slice(0, 6).map(x => `â€¢ ${x}`).join("\n") +
-      "\n";
-  }
-
+  if(signal.direction && signal.direction!=="None") message+=`Primary confirmed timeframe: ${signal.signalTimeframe}\n`;
+  message+=`Independent timeframes: YES\n`;
   return message;
 }
 
@@ -4478,9 +4503,6 @@ let lastTrendlineMonitorSignal = null;
 let lastTrendlineMonitorDecision = null;
 let lastTrendlineTelegramResult = null;
 let lastTrendlineAlertKey = null;
-let trendlineMonitorEnabled = true;
-let trendlineMonitorTimer = null;
-let trendlineMonitorInitialTimer = null;
 
 /*
   Internal trade-state memory for Telegram safety alerts.
@@ -4490,6 +4512,7 @@ let trendlineMonitorInitialTimer = null;
 const activeTrendlineTrades = new Map();
 const lastDangerAlertKeys = new Map();
 const lastDangerAlertResults = new Map();
+const trendlineSignalLifecycle = new Map();
 
 function getOppositeDangerForTimeframe(result, timeframe) {
   const activeTrade = activeTrendlineTrades.get(timeframe);
@@ -4551,18 +4574,32 @@ async function monitorTrendlineSignal() {
         if(telegram?.sent){lastDangerAlertKeys.set(tf,danger.key);console.log("Opposite-trade danger alert sent:",danger.key);}
       }
 
+      if (danger.danger) {
+        trendlineSignalLifecycle.set(tf, danger.level === "CRITICAL" ? "CRITICAL" : "DANGER");
+      } else if (eligible) {
+        trendlineSignalLifecycle.set(tf, "CONFIRMED");
+      } else if (signal.lifecycle === "DEVELOPING") {
+        trendlineSignalLifecycle.set(tf, "DEVELOPING");
+      } else {
+        trendlineSignalLifecycle.set(tf, "WAITING");
+      }
+
       if(eligible&&key&&previousKey!==key){
         const telegram=await sendTelegramMessage(buildTrendlineTelegramMessage({...result,TRENDLINE_SIGNAL:{...signal,signalTimeframe:tf},TRADE_LEVELS:levels}));
         lastTrendlineTelegramResult={...telegram,attemptedAt:new Date().toISOString(),alertKey:key,timeframe:tf};
         if(telegram?.sent){
           TRENDLINE_ALERT_STATE.set(stateKey,key); lastTrendlineAlertKey=key;
           activeTrendlineTrades.set(tf,{timeframe:tf,direction:signal.direction,entry:levels.entry,stopLoss:levels.stopLoss,takeProfit:levels.takeProfit||null,alertKey:key,startedAt:new Date().toISOString()});
+          trendlineSignalLifecycle.set(tf,"ACTIVE");
           lastDangerAlertKeys.delete(tf); lastDangerAlertResults.delete(tf);
           console.log(`Independent ${tf} Trendline entry alert sent:`,key);
         }
       }
     }
 
+    for (const tf of ["1H","15M","5M"]) {
+      perTf[tf].lifecycle=trendlineSignalLifecycle.get(tf)||"WAITING";
+    }
     lastTrendlineMonitorDecision={eligible:Object.values(perTf).some(x=>x.eligible),independentTimeframes:perTf};
     lastTrendlineMonitorError=null;
   } catch(error){
@@ -4570,267 +4607,8 @@ async function monitorTrendlineSignal() {
   } finally { lastTrendlineMonitorFinishedAt=new Date().toISOString(); lastTrendlineMonitorDurationMs=Date.now()-startedAt; trendlineMonitorRunning=false; }
 }
 
-function startTrendlineMonitor(runNow = false) {
-  trendlineMonitorEnabled = true;
-
-  if (trendlineMonitorTimer) {
-    clearInterval(trendlineMonitorTimer);
-  }
-  if (trendlineMonitorInitialTimer) {
-    clearTimeout(trendlineMonitorInitialTimer);
-  }
-
-  trendlineMonitorTimer = setInterval(() => {
-    if (trendlineMonitorEnabled) monitorTrendlineSignal();
-  }, 60 * 1000);
-
-  if (runNow) {
-    monitorTrendlineSignal();
-  } else {
-    trendlineMonitorInitialTimer = setTimeout(() => {
-      if (trendlineMonitorEnabled) monitorTrendlineSignal();
-    }, 15000);
-  }
-
-  return true;
-}
-
-function stopTrendlineMonitor() {
-  trendlineMonitorEnabled = false;
-  if (trendlineMonitorTimer) {
-    clearInterval(trendlineMonitorTimer);
-    trendlineMonitorTimer = null;
-  }
-  if (trendlineMonitorInitialTimer) {
-    clearTimeout(trendlineMonitorInitialTimer);
-    trendlineMonitorInitialTimer = null;
-  }
-  return true;
-}
-
-startTrendlineMonitor(false);
-
-/* =========================================================
-   TELEGRAM COMMAND CONTROL
-   Polls Telegram every few seconds. Only the configured
-   TELEGRAM_CHAT_ID can execute bot commands.
-========================================================= */
-
-function telegramAuthorizedChat(chatId) {
-  return String(chatId ?? "") === String(TELEGRAM_CHAT_ID ?? "");
-}
-
-function telegramCommandHelp() {
-  return [
-    "XAU AI BOT â€” TELEGRAM COMMANDS",
-    "",
-    "/status â€” full bot status",
-    "/signal â€” latest main signal",
-    "/trendline â€” 1H / 15M / 5M trendline status",
-    "/analysis â€” latest main engine analysis",
-    "/health â€” server/API/Telegram health",
-    "/scan â€” run a new full analysis now",
-    "/startmonitor â€” start 60-second trendline monitor",
-    "/stopmonitor â€” stop trendline monitor",
-    "/help â€” show this help"
-  ].join("\n");
-}
-
-function formatTrendlineCommand() {
-  const d = lastTrendlineMonitorDecision?.independentTimeframes || {};
-  const lines = [
-    "XAUUSD TRENDLINE MONITOR",
-    `Monitor: ${trendlineMonitorEnabled ? "RUNNING" : "STOPPED"}`,
-    `Last scan: ${lastTrendlineMonitorFinishedAt || "N/A"}`,
-    `Primary: ${lastTrendlineMonitorSignal?.direction || "None"} | ${lastTrendlineMonitorSignal?.status || "WAITING"} | score ${lastTrendlineMonitorSignal?.score ?? 0}/${lastTrendlineMonitorSignal?.maxScore ?? 11}`,
-    ""
-  ];
-  for (const tf of ["1H", "15M", "5M"]) {
-    const x = d[tf] || {};
-    lines.push(`${tf}: ${x.direction || "None"} | ${x.confirmationGrade || "NONE"} | score ${x.score ?? 0} | eligible ${x.eligible ? "YES" : "NO"}`);
-    if (x.entry != null) lines.push(`  Entry ${x.entry} | SL ${x.stopLoss ?? "N/A"} | TP1 ${x.TP1 ?? "N/A"}`);
-  }
-  return lines.join("\n");
-}
-
-function formatLatestSignal() {
-  const mtf = latestMainAnalysis;
-  if (!mtf) return "No cached main analysis yet. Use /scan.";
-  const e = mtf.ENTRY_CONFIRMATION || {};
-  const l = mtf.TRADE_LEVELS || {};
-  return [
-    "XAUUSD LATEST MAIN SIGNAL",
-    `Updated: ${latestMainAnalysisAt || "N/A"}`,
-    `Price: ${e.currentPrice ?? mtf.importantLevels?.currentPrice ?? "N/A"}`,
-    `Status: ${e.status || "Waiting"}`,
-    `Direction: ${e.direction || "None"}`,
-    `1H: ${mtf.MTF?.["1H"] || "N/A"}`,
-    `15M: ${mtf.MTF?.["15M"] || "N/A"}`,
-    `5M: ${mtf.MTF?.["5M"] || "N/A"}`,
-    `Alignment: ${mtf.MTF?.alignment || "N/A"}`,
-    `Bull score: ${e.bullishScore ?? 0} | Bear score: ${e.bearishScore ?? 0}`,
-    `Entry: ${l.entry ?? "N/A"} | SL: ${l.stopLoss ?? "N/A"} | TP1: ${l.takeProfit?.TP1 ?? "N/A"}`
-  ].join("\n");
-}
-
-function formatStatus() {
-  return [
-    "XAU AI BOT STATUS",
-    `Instrument: ${OUTPUT_SYMBOL}`,
-    `Uptime: ${Math.round(process.uptime())}s`,
-    `Monitor: ${trendlineMonitorEnabled ? "RUNNING" : "STOPPED"}`,
-    `Monitor scan active: ${trendlineMonitorRunning ? "YES" : "NO"}`,
-    `Monitor interval: 60s`,
-    `Last monitor start: ${lastTrendlineMonitorStartedAt || "N/A"}`,
-    `Last monitor finish: ${lastTrendlineMonitorFinishedAt || "N/A"}`,
-    `Last monitor error: ${lastTrendlineMonitorError || "None"}`,
-    `Latest main analysis: ${latestMainAnalysisAt || "Not yet run"}`,
-    `Latest signal: ${latestMainAnalysis?.ENTRY_CONFIRMATION?.direction || "None"} / ${latestMainAnalysis?.ENTRY_CONFIRMATION?.status || "Waiting"}`,
-    `Telegram configured: ${TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID ? "YES" : "NO"}`,
-    `Telegram polling error: ${telegramLastPollError || "None"}`,
-    `Last analysis error: ${latestMainAnalysisError || "None"}`
-  ].join("\n");
-}
-
-async function telegramHealthCheck() {
-  const result = {
-    server: "OK",
-    telegramConfig: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
-    telegramApi: "UNKNOWN",
-    twelveDataConfig: !!TWELVE_DATA_API_KEY,
-    aiConfig: !!(GEMINI_API_KEY || OPENROUTER_API_KEY),
-    checkedAt: new Date().toISOString()
-  };
-
-  if (!TELEGRAM_BOT_TOKEN) {
-    result.telegramApi = "NOT_CONFIGURED";
-    return result;
-  }
-
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`);
-    const data = await response.json();
-    result.telegramApi = response.ok && data.ok ? "OK" : `ERROR: ${data.description || "API failure"}`;
-  } catch (error) {
-    result.telegramApi = `ERROR: ${error.message}`;
-  }
-  return result;
-}
-
-async function runMainAnalysis({sendAlerts = false} = {}) {
-  const mtf = await mtfAnalysis();
-  const ai = await geminiAnalysis(mtf);
-  latestMainAnalysis = {...mtf, AI_ANALYSIS: ai};
-  latestMainAnalysisAt = new Date().toISOString();
-  latestMainAnalysisError = null;
-
-  if (sendAlerts) {
-    if (mtf.ENTRY_CONFIRMATION?.status === "BUY CONFIRMED" || mtf.ENTRY_CONFIRMATION?.status === "SELL CONFIRMED") {
-      await sendTelegramMessage(buildTelegramMessage(mtf));
-    }
-  }
-
-  return latestMainAnalysis;
-}
-
-async function handleTelegramCommand(message) {
-  if (!message?.chat || !telegramAuthorizedChat(message.chat.id)) return;
-  const raw = String(message.text || "").trim();
-  if (!raw.startsWith("/")) return;
-
-  const command = raw.split(/\s+/)[0].toLowerCase().split("@")[0];
-  const send = (text) => sendTelegramMessage(text);
-
-  try {
-    switch (command) {
-      case "/help":
-        await send(telegramCommandHelp());
-        break;
-      case "/status":
-        await send(formatStatus());
-        break;
-      case "/signal":
-        await send(formatLatestSignal());
-        break;
-      case "/trendline":
-        await send(formatTrendlineCommand());
-        break;
-      case "/analysis": {
-        if (!latestMainAnalysis) await runMainAnalysis();
-        const aiText = typeof latestMainAnalysis?.AI_ANALYSIS === "string"
-          ? latestMainAnalysis.AI_ANALYSIS
-          : JSON.stringify(latestMainAnalysis?.AI_ANALYSIS || "N/A");
-        await send(formatLatestSignal() + "\n\nAI ANALYSIS\n" + aiText);
-        break;
-      }
-      case "/health": {
-        const h = await telegramHealthCheck();
-        await send("XAU AI BOT HEALTH\n\n" + Object.entries(h).map(([k,v]) => `${k}: ${v}`).join("\n"));
-        break;
-      }
-      case "/scan": {
-        await send("ðŸ”Ž New XAUUSD analysis started...");
-        const result = await runMainAnalysis({sendAlerts:false});
-        const e = result.ENTRY_CONFIRMATION || {};
-        await send([
-          "XAUUSD SCAN COMPLETE",
-          `Price: ${e.currentPrice ?? result.importantLevels?.currentPrice ?? "N/A"}`,
-          `Status: ${e.status || "Waiting"}`,
-          `Direction: ${e.direction || "None"}`,
-          `1H/15M/5M: ${result.MTF?.["1H"] || "N/A"} / ${result.MTF?.["15M"] || "N/A"} / ${result.MTF?.["5M"] || "N/A"}`,
-          `Entry: ${result.TRADE_LEVELS?.entry ?? "N/A"}`,
-          `SL: ${result.TRADE_LEVELS?.stopLoss ?? "N/A"}`,
-          `TP1: ${result.TRADE_LEVELS?.takeProfit?.TP1 ?? "N/A"}`
-        ].join("\n"));
-        break;
-      }
-      case "/startmonitor":
-        startTrendlineMonitor(true);
-        await send("âœ… Trendline monitor STARTED. It will scan every 60 seconds.");
-        break;
-      case "/stopmonitor":
-        stopTrendlineMonitor();
-        await send("ðŸ›‘ Trendline monitor STOPPED. No 60-second scans will run until /startmonitor.");
-        break;
-      default:
-        await send("Unknown command. Use /help");
-    }
-  } catch (error) {
-    latestMainAnalysisError = error.message;
-    await send(`âŒ Command ${command} failed\n${error.message}`);
-  }
-}
-
-async function pollTelegramCommands() {
-  if (telegramPollingRunning || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-  telegramPollingRunning = true;
-  telegramLastPollAt = new Date().toISOString();
-  try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=${telegramUpdateOffset}&timeout=0&allowed_updates=${encodeURIComponent(JSON.stringify(["message"]))}`;
-    const response = await fetch(url);
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.description || "Telegram getUpdates failed");
-
-    for (const update of data.result || []) {
-      telegramUpdateOffset = Math.max(telegramUpdateOffset, Number(update.update_id) + 1);
-      await handleTelegramCommand(update.message);
-    }
-    telegramLastPollError = null;
-  } catch (error) {
-    telegramLastPollError = error.message;
-    console.log("Telegram command polling error:", error.message);
-  } finally {
-    telegramPollingRunning = false;
-  }
-}
-
-async function telegramCommandLoop() {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-  await pollTelegramCommands();
-  telegramPollingTimer = setTimeout(telegramCommandLoop, 3000);
-}
-
-telegramCommandLoop();
+setTimeout(monitorTrendlineSignal, 15000);
+setInterval(monitorTrendlineSignal, 60 * 1000);
 
 /* =========================================================
    ROOT
@@ -4868,7 +4646,6 @@ app.get(
         "/trendline-monitor-status"
       ],
       trendlineMonitor: {
-        enabled: trendlineMonitorEnabled,
         intervalSeconds: 60,
         running: trendlineMonitorRunning,
         lastStartedAt: lastTrendlineMonitorStartedAt,
@@ -4881,13 +4658,6 @@ app.get(
         lastAlertKey: lastTrendlineAlertKey,
         activeTrades: Object.fromEntries([...activeTrendlineTrades].map(([tf,v]) => [tf,v])),
         lastDangerAlerts: Object.fromEntries([...lastDangerAlertResults].map(([tf,v]) => [tf,v]))
-      },
-      telegramCommands: {
-        enabled: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
-        authorizedChatIdConfigured: !!TELEGRAM_CHAT_ID,
-        pollingRunning: telegramPollingRunning,
-        lastPollAt: telegramLastPollAt,
-        lastPollError: telegramLastPollError
       }
     });
   }
@@ -4905,7 +4675,6 @@ app.get(
       success: true,
       instrument: OUTPUT_SYMBOL,
       monitor: {
-        enabled: trendlineMonitorEnabled,
         intervalSeconds: 60,
         running: trendlineMonitorRunning,
         lastStartedAt: lastTrendlineMonitorStartedAt,
@@ -5039,67 +4808,25 @@ app.get(
   "/trendline-analysis",
   async (req, res) => {
     try {
-      const [
-        candles1H,
-        candles15M,
-        candles5M
-      ] = await Promise.all([
-        getCandles(TF["1H"], 350),
-        getCandles(TF["15M"], 350),
-        getCandles(TF["5M"], 350)
+      const [candles1H,candles15M,candles5M]=await Promise.all([
+        getCandles(TF["1H"],350),getCandles(TF["15M"],350),getCandles(TF["5M"],350)
       ]);
-
-      const result = trendlineAnalysis(
-        candles1H,
-        candles15M,
-        candles5M
-      );
-
-      let telegram = null;
-      const signal = result.TRENDLINE_SIGNAL;
-
-      if (
-        signal?.direction &&
-        signal.direction !== "None" &&
-        signal.score >= 7 &&
-        result.TRADE_LEVELS?.entry &&
-        result.TRADE_LEVELS?.stopLoss &&
-        result.TRADE_LEVELS?.takeProfit?.TP1
-      ) {
-        const key = trendlineAlertKey(result);
-
-        if (
-          key &&
-          TRENDLINE_ALERT_STATE.get(`XAUUSD:${signal?.signalTimeframe || "5M"}`) !== key
-        ) {
-          telegram = await sendTelegramMessage(
-            buildTrendlineTelegramMessage(result)
-          );
-
-          if (telegram?.sent) {
-            TRENDLINE_ALERT_STATE.set(
-              `XAUUSD:${signal?.signalTimeframe || "5M"}`,
-              key
-            );
-          }
-        } else {
-          telegram = {
-            sent: false,
-            reason: "Duplicate Trendline signal suppressed"
-          };
-        }
+      const result=trendlineAnalysis(candles1H,candles15M,candles5M);
+      const telegrams={};
+      for(const tf of ["1H","15M","5M"]){
+        const item=result.INDEPENDENT_TRADE_SIGNALS?.[tf]||{};
+        const signal=item.signal||{}; const levels=item.levels||{};
+        if(signal.ready&&signal.direction&&levels.entry&&levels.stopLoss&&levels.takeProfit?.TP1){
+          const key=trendlineAlertKey(result,tf); const stateKey=`XAUUSD:${tf}`;
+          if(key&&TRENDLINE_ALERT_STATE.get(stateKey)!==key){
+            const tg=await sendTelegramMessage(buildTrendlineTelegramMessage({...result,TRENDLINE_SIGNAL:{...signal,signalTimeframe:tf}}));
+            telegrams[tf]=tg;
+            if(tg?.sent) TRENDLINE_ALERT_STATE.set(stateKey,key);
+          } else telegrams[tf]={sent:false,reason:"Duplicate independent Trendline signal suppressed"};
+        } else telegrams[tf]={sent:false,reason:"No confirmed independent trade setup"};
       }
-
-      res.json({
-        ...result,
-        TRENDLINE_TELEGRAM: telegram
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        error: error.message
-      });
-    }
+      res.json({...result,TRENDLINE_TELEGRAM:telegrams});
+    } catch(error){res.status(500).json({success:false,error:error.message});}
   }
 );
 
@@ -5118,13 +4845,6 @@ app.get(
         await geminiAnalysis(
           mtf
         );
-
-      latestMainAnalysis = {
-        ...mtf,
-        AI_ANALYSIS: ai
-      };
-      latestMainAnalysisAt = new Date().toISOString();
-      latestMainAnalysisError = null;
 
       let telegram =
         null;
@@ -5146,46 +4866,21 @@ app.get(
           );
       }
 
-      let trendlineTelegram = null;
-      const trendlineResult =
-        mtf.TRENDLINE_ANALYSIS;
-      const trendlineSignal =
-        trendlineResult?.TRENDLINE_SIGNAL;
-
-      if (
-        trendlineSignal?.direction &&
-        trendlineSignal.direction !== "None" &&
-        trendlineSignal.score >= 7
-      ) {
-        const key = trendlineAlertKey(
-          trendlineResult
-        );
-
-        if (
-          key &&
-          TRENDLINE_ALERT_STATE.get(
-            `XAUUSD:${trendlineSignal?.signalTimeframe || "5M"}`
-          ) !== key
-        ) {
-          trendlineTelegram =
-            await sendTelegramMessage(
-              buildTrendlineTelegramMessage(
-                trendlineResult
-              )
-            );
-
-          if (trendlineTelegram?.sent) {
-            TRENDLINE_ALERT_STATE.set(
-              `XAUUSD:${trendlineSignal?.signalTimeframe || "5M"}`,
-              key
-            );
-          }
-        } else {
-          trendlineTelegram = {
-            sent: false,
-            reason: "Duplicate Trendline signal suppressed"
-          };
-        }
+      let trendlineTelegram = {};
+      const trendlineResult = mtf.TRENDLINE_ANALYSIS;
+      for (const tf of ["1H","15M","5M"]) {
+        const item = trendlineResult?.INDEPENDENT_TRADE_SIGNALS?.[tf] || {};
+        const sig = item.signal || {};
+        const levels = item.levels || {};
+        if (sig.ready && levels.entry && levels.stopLoss && levels.takeProfit?.TP1) {
+          const key = trendlineAlertKey(trendlineResult, tf);
+          const stateKey = `XAUUSD:${tf}`;
+          if (key && TRENDLINE_ALERT_STATE.get(stateKey) !== key) {
+            const tg = await sendTelegramMessage(buildTrendlineTelegramMessage({...trendlineResult,TRENDLINE_SIGNAL:{...sig,signalTimeframe:tf}}));
+            trendlineTelegram[tf] = tg;
+            if (tg?.sent) TRENDLINE_ALERT_STATE.set(stateKey,key);
+          } else trendlineTelegram[tf] = {sent:false,reason:"Duplicate independent Trendline signal suppressed"};
+        } else trendlineTelegram[tf] = {sent:false,reason:"No confirmed independent trade setup"};
       }
 
       res.json({
@@ -5279,6 +4974,266 @@ app.get(
     }
   }
 );
+
+/* =========================================================
+   HIGH-FREQUENCY EXECUTION BRIDGE
+   Render = decision brain; Liquid Chart = execution arm.
+
+   IMPORTANT:
+   - AUTO_TRADE is OFF by default.
+   - The endpoint is intentionally fast and does NOT call the LLM on every tick.
+   - MTF/AI context is refreshed in the background and cached.
+========================================================= */
+
+const HF_AUTO_TRADE =
+  String(process.env.AUTO_TRADE || "false").toLowerCase() === "true";
+
+const HF_SECRET =
+  process.env.HF_SECRET || "";
+
+const HF_CONFIG = {
+  tickHistoryMs: 6000,
+  refreshMtfMs: 8000,
+  refreshAiMs: 30000,
+  minMove: num(process.env.HF_MIN_MOVE, 0.12),
+  strongMove: num(process.env.HF_STRONG_MOVE, 0.28),
+  maxSpread: num(process.env.HF_MAX_SPREAD, 0.35),
+  minHoldMs: num(process.env.HF_MIN_HOLD_MS, 1500),
+  cooldownMs: num(process.env.HF_COOLDOWN_MS, 1800),
+  slPips: num(process.env.HF_SL_PIPS, 80),
+  tpPips: num(process.env.HF_TP_PIPS, 55),
+  bePips: num(process.env.HF_BE_PIPS, 30),
+  trailPips: num(process.env.HF_TRAIL_PIPS, 25)
+};
+
+const hfTicks = [];
+let hfMtfCache = null;
+let hfMtfUpdatedAt = 0;
+let hfAiCache = null;
+let hfAiUpdatedAt = 0;
+let hfLastDecision = null;
+let hfLastSignalKey = null;
+let hfLastSignalAt = 0;
+let hfRefreshRunning = false;
+
+function hfAuthorized(req) {
+  if (!HF_SECRET) return true;
+  return String(req.get("X-HF-Secret") || "") === HF_SECRET;
+}
+
+function hfPushTick(bid, ask) {
+  const b = num(bid);
+  const a = num(ask);
+  if (!Number.isFinite(b) || !Number.isFinite(a) || b <= 0 || a <= 0) return null;
+
+  const now = Date.now();
+  const mid = (b + a) / 2;
+  hfTicks.push({ t: now, bid: b, ask: a, mid });
+
+  const cutoff = now - HF_CONFIG.tickHistoryMs;
+  while (hfTicks.length && hfTicks[0].t < cutoff) hfTicks.shift();
+
+  return hfTicks[hfTicks.length - 1];
+}
+
+function hfMoveFrom(ms) {
+  if (hfTicks.length < 2) return 0;
+  const now = Date.now();
+  const target = now - ms;
+  let base = hfTicks[0];
+  for (let i = hfTicks.length - 1; i >= 0; i--) {
+    if (hfTicks[i].t <= target) {
+      base = hfTicks[i];
+      break;
+    }
+  }
+  return hfTicks[hfTicks.length - 1].mid - base.mid;
+}
+
+function hfEngineDirection(mtf) {
+  const entry = mtf?.ENTRY_CONFIRMATION || {};
+  if (entry.status === "BUY CONFIRMED") return "BUY";
+  if (entry.status === "SELL CONFIRMED") return "SELL";
+
+  const per = mtf?.TRENDLINE_ANALYSIS?.INDEPENDENT_TRADE_SIGNALS || {};
+  const ready = Object.values(per)
+    .map(x => x?.signal || {})
+    .filter(x => x.ready && (x.direction === "BUY" || x.direction === "SELL"))
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  if (ready[0]?.score >= 7) return ready[0].direction;
+  return "NONE";
+}
+
+function hfMtfAgreement(mtf, direction) {
+  if (!mtf || direction === "NONE") return false;
+  const align = String(mtf?.MTF?.alignment || "");
+  if (direction === "BUY" && /Bullish/i.test(align)) return true;
+  if (direction === "SELL" && /Bearish/i.test(align)) return true;
+  return false;
+}
+
+async function hfRefreshContext(force = false) {
+  const now = Date.now();
+  if (hfRefreshRunning) return;
+  if (!force && now - hfMtfUpdatedAt < HF_CONFIG.refreshMtfMs) return;
+
+  hfRefreshRunning = true;
+  try {
+    hfMtfCache = await mtfAnalysis();
+    hfMtfUpdatedAt = Date.now();
+
+    if (Date.now() - hfAiUpdatedAt >= HF_CONFIG.refreshAiMs) {
+      // AI text is contextual only; the fast execution decision remains numeric/deterministic.
+      try {
+        hfAiCache = await geminiAnalysis(hfMtfCache);
+      } catch (e) {
+        hfAiCache = { available: false, error: e.message };
+      }
+      hfAiUpdatedAt = Date.now();
+    }
+  } catch (e) {
+    hfMtfCache = hfMtfCache || null;
+  } finally {
+    hfRefreshRunning = false;
+  }
+}
+
+function hfDecision(bid, ask) {
+  const latest = hfTicks[hfTicks.length - 1];
+  if (!latest) return { action: "WAIT", reason: "NO_LIVE_PRICE" };
+
+  const spread = ask - bid;
+  const move1 = hfMoveFrom(1000);
+  const move3 = hfMoveFrom(3000);
+  const acceleration = move1 - (move3 / 3);
+  const engineDir = hfEngineDirection(hfMtfCache);
+  const agreement = hfMtfAgreement(hfMtfCache, engineDir);
+
+  let momentumDir = "NONE";
+  if (move1 >= HF_CONFIG.minMove && acceleration >= 0) momentumDir = "BUY";
+  if (move1 <= -HF_CONFIG.minMove && acceleration <= 0) momentumDir = "SELL";
+
+  let action = "WAIT";
+  let reason = "NO_MOMENTUM";
+  let confidence = 0;
+
+  if (spread > HF_CONFIG.maxSpread) {
+    reason = "SPREAD_TOO_WIDE";
+  } else if (momentumDir === "NONE") {
+    reason = "WAITING_FOR_MOMENTUM";
+  } else {
+    const strong = Math.abs(move1) >= HF_CONFIG.strongMove;
+
+    if (engineDir === momentumDir && agreement) {
+      action = momentumDir;
+      confidence = strong ? 90 : 78;
+      reason = "MOMENTUM_PLUS_RENDER_MTF_CONFIRMATION";
+    } else if (engineDir === "NONE" && strong) {
+      action = momentumDir;
+      confidence = 68;
+      reason = "STRONG_LIVE_MOMENTUM_WITHOUT_CONFLICT";
+    } else {
+      reason = "MOMENTUM_CONFLICTS_WITH_RENDER_CONTEXT";
+    }
+  }
+
+  const signalKey = `${action}:${Math.round(latest.mid * 100)}:${engineDir}`;
+  const now = Date.now();
+  const duplicate = action !== "WAIT" && signalKey === hfLastSignalKey && now - hfLastSignalAt < HF_CONFIG.cooldownMs;
+
+  if (duplicate) {
+    action = "WAIT";
+    reason = "DUPLICATE_SIGNAL_COOLDOWN";
+  } else if (action !== "WAIT") {
+    hfLastSignalKey = signalKey;
+    hfLastSignalAt = now;
+  }
+
+  const out = {
+    success: true,
+    instrument: OUTPUT_SYMBOL,
+    action,
+    executionAllowed: HF_AUTO_TRADE,
+    confidence,
+    reason,
+    price: round(latest.mid, 5),
+    bid: round(bid, 5),
+    ask: round(ask, 5),
+    spread: round(spread, 5),
+    move1s: round(move1, 5),
+    move3s: round(move3, 5),
+    acceleration: round(acceleration, 5),
+    renderDirection: engineDir,
+    renderMtfAlignment: hfMtfCache?.MTF?.alignment || "Unknown",
+    renderEntryStatus: hfMtfCache?.ENTRY_CONFIRMATION?.status || "WAITING",
+    aiAvailable: !!hfAiCache?.available,
+    aiProvider: hfAiCache?.provider || null,
+    levels: {
+      slPips: HF_CONFIG.slPips,
+      tpPips: HF_CONFIG.tpPips,
+      bePips: HF_CONFIG.bePips,
+      trailPips: HF_CONFIG.trailPips
+    },
+    contextUpdatedAt: hfMtfUpdatedAt ? new Date(hfMtfUpdatedAt).toISOString() : null,
+    aiUpdatedAt: hfAiUpdatedAt ? new Date(hfAiUpdatedAt).toISOString() : null,
+    timestamp: new Date().toISOString()
+  };
+
+  hfLastDecision = out;
+  return out;
+}
+
+// Fast execution decision. Liquid Chart supplies the broker's live bid/ask.
+app.get("/hf/decision", async (req, res) => {
+  try {
+    if (!hfAuthorized(req)) return res.status(401).json({ success: false, error: "Unauthorized" });
+
+    const bid = num(req.query.bid);
+    const ask = num(req.query.ask);
+    if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
+      return res.status(400).json({ success: false, error: "bid and ask are required" });
+    }
+
+    hfPushTick(bid, ask);
+    await hfRefreshContext(false);
+    res.json(hfDecision(bid, ask));
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/hf/tick", async (req, res) => {
+  try {
+    if (!hfAuthorized(req)) return res.status(401).json({ success: false, error: "Unauthorized" });
+    const bid = num(req.body?.bid);
+    const ask = num(req.body?.ask);
+    if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
+      return res.status(400).json({ success: false, error: "bid and ask are required" });
+    }
+    hfPushTick(bid, ask);
+    await hfRefreshContext(false);
+    res.json(hfDecision(bid, ask));
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/hf/status", (req, res) => {
+  res.json({
+    success: true,
+    instrument: OUTPUT_SYMBOL,
+    autoTrade: HF_AUTO_TRADE,
+    ticks: hfTicks.length,
+    mtfUpdatedAt: hfMtfUpdatedAt ? new Date(hfMtfUpdatedAt).toISOString() : null,
+    aiUpdatedAt: hfAiUpdatedAt ? new Date(hfAiUpdatedAt).toISOString() : null,
+    lastDecision: hfLastDecision
+  });
+});
+
+setInterval(() => {
+  hfRefreshContext(false).catch(() => {});
+}, 2000);
 
 /* =========================================================
    SERVER
