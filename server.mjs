@@ -5681,6 +5681,75 @@ async function buildHFDecision(bid, ask) {
     HF_STATE.decisionRunning = false;
   }
 }
+
+/* =========================================================
+   LIQUID CHART / MYTRADER DECISION BRIDGE
+   Liquid UDIX polls this endpoint. Render remains analysis-only;
+   actual broker execution is performed by Liquid Chart via FXB.
+========================================================= */
+
+const LIQUID_AUTO_TRADE = String(process.env.LIQUID_AUTO_TRADE || "false").toLowerCase() === "true";
+const LIQUID_SIGNAL_SOURCE = String(process.env.LIQUID_SIGNAL_SOURCE || "GOLDARA").toUpperCase();
+
+app.get("/liquid/decision", async (req, res) => {
+  if (!hfAuthorized(req)) return res.status(401).json({success:false,error:"Unauthorized"});
+
+  try {
+    const bid = Number(req.query?.bid);
+    const ask = Number(req.query?.ask);
+    const main = await buildHFDecision(
+      Number.isFinite(bid) && Number.isFinite(ask) ? bid : undefined,
+      Number.isFinite(bid) && Number.isFinite(ask) ? ask : undefined
+    );
+    const goldara = await goldaraScan();
+
+    const gs = goldara?.SIGNAL || {};
+    const gl = goldara?.TRADE_LEVELS || null;
+    const goldaraDecision = {
+      signal: gs.ready && (gs.direction === "BUY" || gs.direction === "SELL") ? gs.direction : "WAIT",
+      status: gs.status || "WAITING",
+      score: gs.score ?? 0,
+      maxScore: gs.maxScore ?? 12,
+      reasons: gs.reasons || [],
+      warnings: gs.warnings || [],
+      tradeLevels: gl,
+      executionAllowed: LIQUID_AUTO_TRADE && !!(gs.ready && gl?.entry && gl?.stopLoss && gl?.takeProfit?.TP1),
+      engine: "GOLDARA_STYLE_SMC_SIGNAL"
+    };
+
+    const selected = LIQUID_SIGNAL_SOURCE === "MAIN" ? main : goldaraDecision;
+
+    res.json({
+      success: true,
+      instrument: OUTPUT_SYMBOL,
+      generatedAt: new Date().toISOString(),
+      liquidAutoTrade: LIQUID_AUTO_TRADE,
+      signalSource: LIQUID_SIGNAL_SOURCE,
+      selected,
+      main: {
+        signal: main?.signal || "WAIT",
+        status: main?.status || "WAITING",
+        score: main?.signal === "BUY" ? main?.bullishScore : main?.signal === "SELL" ? main?.bearishScore : Math.max(main?.bullishScore || 0, main?.bearishScore || 0),
+        bullishScore: main?.bullishScore ?? 0,
+        bearishScore: main?.bearishScore ?? 0,
+        reasons: main?.reasons || [],
+        tradeLevels: main?.tradeLevels || null,
+        executionAllowed: LIQUID_AUTO_TRADE && !!main?.executionAllowed,
+        engine: main?.engine || "XAU_AI_ADAPTIVE_MOMENTUM_V2"
+      },
+      goldara: {
+        ...goldaraDecision,
+        currentPrice: goldara?.currentPrice ?? null,
+        mtf: goldara?.MTF || null,
+        structure: goldara?.STRUCTURE || null,
+        smc: goldara?.SMC || null
+      }
+    });
+  } catch (error) {
+    res.status(500).json({success:false,error:error.message});
+  }
+});
+
 app.get("/hf/status", (req, res) => {
   if (!hfAuthorized(req)) return res.status(401).json({success:false,error:"Unauthorized"});
   res.json({
