@@ -4498,6 +4498,136 @@ setInterval(
    Incoming Telegram commands via getUpdates.
    Restricted to TELEGRAM_CHAT_ID and safe read/monitor controls.
 ========================================================= */
+/* =========================================================
+   GOLDARA-STYLE SPECIAL SIGNAL ENGINE
+   Separate Telegram-only signal layer. No trade execution.
+========================================================= */
+const GOLDARA_SIGNAL_COOLDOWN_MS = 5 * 60 * 1000;
+const GOLDARA_MONITOR_MS = 60 * 1000;
+let goldaraMonitorEnabled = true;
+let goldaraMonitorBusy = false;
+let goldaraLastScan = null;
+let goldaraLastTelegram = null;
+let goldaraLastError = null;
+let goldaraLastSignalKey = null;
+let goldaraLastSignalSentAt = 0;
+
+function goldaraZoneHit(price, zones) {
+  if (!Number.isFinite(price) || !Array.isArray(zones)) return false;
+  return zones.some(z => {
+    const low = Number(z?.low), high = Number(z?.high);
+    if (!Number.isFinite(low) || !Number.isFinite(high)) return false;
+    const pad = Math.abs(high - low) * 0.35;
+    return price >= low - pad && price <= high + pad;
+  });
+}
+
+function goldaraAnalyzeTimeframe(candles, timeframe) {
+  const current = last(candles);
+  const structure = structureAnalysis(candles);
+  const br = structureBreakAnalysis(candles, structure);
+  const liquidity = liquidityAnalysis(candles);
+  const fvg = findFVG(candles, 8);
+  const orderBlocks = findOrderBlocks(candles, 8);
+  const candle = candleAnalysis(candles);
+  const indicators = indicatorAnalysis(candles);
+  return {
+    timeframe,
+    currentPrice: current?.close ?? null,
+    trend: indicators?.trend || "Neutral",
+    structure,
+    break: br,
+    liquidity,
+    FVG: fvg,
+    orderBlocks,
+    candle,
+    ATR: indicators?.ATR14 ?? atr(candles, 14),
+    indicators,
+    lastTime: current?.time || null
+  };
+}
+
+function goldaraSetup(direction, a1, a15, a5) {
+  const buy = direction === "BUY";
+  const reasons = [], warnings = [];
+  let score = 0;
+  const trendOk = buy
+    ? (a1.trend === "Strong Bullish" || a1.trend === "Bullish") && !["Strong Bearish","Bearish"].includes(a15.trend)
+    : (a1.trend === "Strong Bearish" || a1.trend === "Bearish") && !["Strong Bullish","Bullish"].includes(a15.trend);
+  if (trendOk) { score += 2; reasons.push("1H trend + 15M alignment"); }
+  const structureOk = buy
+    ? (a15.structure?.structure === "Bullish Structure" || a15.break?.direction === "Bullish")
+    : (a15.structure?.structure === "Bearish Structure" || a15.break?.direction === "Bearish");
+  if (structureOk) { score += 2; reasons.push("15M market structure"); }
+  const bosChoch = buy
+    ? (a15.break?.BOS === "Bullish BOS" || a15.break?.CHoCH === "Bullish CHoCH")
+    : (a15.break?.BOS === "Bearish BOS" || a15.break?.CHoCH === "Bearish CHoCH");
+  if (bosChoch) { score += 2; reasons.push("15M BOS/CHoCH"); }
+  const ltfDisplacement = buy ? a5.break?.BOS === "Bullish BOS" : a5.break?.BOS === "Bearish BOS";
+  if (ltfDisplacement) { score += 2; reasons.push("5M displacement BOS"); }
+  const sweep = buy ? a5.liquidity?.latestSweep === "Bullish Liquidity Sweep" : a5.liquidity?.latestSweep === "Bearish Liquidity Sweep";
+  if (sweep) { score += 1; reasons.push("Liquidity sweep"); }
+  const zone = buy
+    ? (goldaraZoneHit(a5.currentPrice, a5.FVG?.demand) || goldaraZoneHit(a5.currentPrice, a5.FVG?.bullish) || goldaraZoneHit(a5.currentPrice, a5.orderBlocks?.demand) || goldaraZoneHit(a5.currentPrice, a5.orderBlocks?.bullish))
+    : (goldaraZoneHit(a5.currentPrice, a5.FVG?.supply) || goldaraZoneHit(a5.currentPrice, a5.FVG?.bearish) || goldaraZoneHit(a5.currentPrice, a5.orderBlocks?.supply) || goldaraZoneHit(a5.currentPrice, a5.orderBlocks?.bearish));
+  if (zone) { score += 1; reasons.push("FVG / Order Block zone"); }
+  const rsi5 = Number(a5.indicators?.RSI14), ema9 = Number(a5.indicators?.EMA9), ema21 = Number(a5.indicators?.EMA21);
+  const momentum = buy ? rsi5 > 52 && a5.indicators?.MACD?.bias === "Bullish" && ema9 > ema21 : rsi5 < 48 && a5.indicators?.MACD?.bias === "Bearish" && ema9 < ema21;
+  if (momentum) { score += 1; reasons.push("Momentum aligned"); }
+  const patterns = a5.candle?.patterns || [];
+  const candleOk = buy
+    ? a5.candle?.direction === "Bullish" && (a5.candle?.strength === "Strong" || a5.candle?.displacement === "Strong" || patterns.includes("Bullish Engulfing") || patterns.includes("Bullish Rejection") || patterns.includes("Bullish Pin Bar"))
+    : a5.candle?.direction === "Bearish" && (a5.candle?.strength === "Strong" || a5.candle?.displacement === "Strong" || patterns.includes("Bearish Engulfing") || patterns.includes("Bearish Rejection") || patterns.includes("Bearish Pin Bar"));
+  if (candleOk) { score += 1; reasons.push("5M candle confirmation"); }
+  const ready = score >= 8 && trendOk && ltfDisplacement && Number(a5.ATR) > 0;
+  if (score < 8) warnings.push("Insufficient confluence");
+  if (!trendOk) warnings.push("Higher-timeframe conflict");
+  if (!ltfDisplacement) warnings.push("No fresh 5M displacement BOS");
+  return {direction, score, maxScore:12, ready, reasons, warnings, confirmations:{trendOk,structureOk,bosChoch,ltfDisplacement,sweep,zone,momentum,candleOk}};
+}
+
+function goldaraLevels(direction, a5) {
+  const price = Number(a5.currentPrice), A = Number(a5.ATR || 0);
+  const structural = direction === "BUY" ? Number(a5.structure?.latestSwingLow?.price) : Number(a5.structure?.latestSwingHigh?.price);
+  if (!Number.isFinite(price) || !Number.isFinite(A) || A <= 0 || !Number.isFinite(structural)) return null;
+  const raw = Math.abs(price - structural);
+  if (raw < A * 0.75 || raw > A * 1.80) return null;
+  const stopLoss = direction === "BUY" ? price - raw : price + raw;
+  const risk = Math.abs(price - stopLoss);
+  return {entry:round(price,2),stopLoss:round(stopLoss,2),takeProfit:{TP1:round(direction === "BUY" ? price + risk*1.5 : price - risk*1.5,2),TP2:round(direction === "BUY" ? price + risk*2 : price - risk*2,2),TP3:round(direction === "BUY" ? price + risk*2.5 : price - risk*2.5,2)},risk:round(risk,2),rr:"1:1.5 / 1:2 / 1:2.5"};
+}
+
+async function goldaraScan() {
+  const [c1,c15,c5] = await Promise.all([getCandles(TF["1H"],350),getCandles(TF["15M"],350),getCandles(TF["5M"],350)]);
+  const a1=goldaraAnalyzeTimeframe(c1,"1H"),a15=goldaraAnalyzeTimeframe(c15,"15M"),a5=goldaraAnalyzeTimeframe(c5,"5M");
+  const buy=goldaraSetup("BUY",a1,a15,a5),sell=goldaraSetup("SELL",a1,a15,a5),candidates=[];
+  for(const setup of [buy,sell]) if(setup.ready){const levels=goldaraLevels(setup.direction,a5);if(levels)candidates.push({...setup,levels});}
+  candidates.sort((a,b)=>b.score-a.score);
+  const chosen=candidates[0]||null;
+  const result={success:true,engine:"GOLDARA_STYLE_SMC_SIGNAL",mode:"TELEGRAM_SIGNAL_ONLY",execution:false,instrument:OUTPUT_SYMBOL,generatedAt:new Date().toISOString(),currentPrice:round(a5.currentPrice,2),MTF:{"1H":a1.trend,"15M":a15.trend,"5M":a5.trend},STRUCTURE:{"1H":a1.structure?.structure,"15M":a15.structure?.structure,"5M":a5.structure?.structure},SMC:{"15M":{BOS:a15.break?.BOS,CHoCH:a15.break?.CHoCH},"5M":{BOS:a5.break?.BOS,CHoCH:a5.break?.CHoCH,Liquidity:a5.liquidity?.latestSweep}},SETUPS:{BUY:buy,SELL:sell},SIGNAL:chosen?{status:`${chosen.direction} CONFIRMED`,...chosen}:{status:"WAITING",direction:"None",score:Math.max(buy.score,sell.score),maxScore:12,reasons:[],warnings:["No complete Goldara setup"]},TRADE_LEVELS:chosen?.levels||null};
+  goldaraLastScan=result; return result;
+}
+
+function buildGoldaraTelegramMessage(x) {
+  const s=x?.SIGNAL||{},l=x?.TRADE_LEVELS||{};
+  const lines=["â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”","â­ GOLDARA SPECIAL SIGNAL","â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”","",`XAUUSD ${s.direction||"WAITING"}`,`Status: ${s.status||"WAITING"}`,`Entry: ${l.entry??x?.currentPrice??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,`TP1: ${l.takeProfit?.TP1??"N/A"}`,`TP2: ${l.takeProfit?.TP2??"N/A"}`,`TP3: ${l.takeProfit?.TP3??"N/A"}`,`RR: ${l.rr??"N/A"}`,"",`Confluence: ${s.score??0}/${s.maxScore??12}`,"",`1H: ${x?.MTF?.["1H"]||"N/A"}`,`15M: ${x?.MTF?.["15M"]||"N/A"}`,`5M: ${x?.MTF?.["5M"]||"N/A"}`,`15M BOS: ${x?.SMC?.["15M"]?.BOS||"None"}`,`15M CHoCH: ${x?.SMC?.["15M"]?.CHoCH||"None"}`,`5M BOS: ${x?.SMC?.["5M"]?.BOS||"None"}`,`Liquidity: ${x?.SMC?.["5M"]?.Liquidity||"None"}`];
+  if(s.reasons?.length) lines.push("","CONFIRMATIONS",...s.reasons.slice(0,12).map(z=>`âœ“ ${z}`));
+  if(s.warnings?.length) lines.push("","WARNINGS",...s.warnings.slice(0,8).map(z=>`â€¢ ${z}`));
+  lines.push("",`Time: ${new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata",hour12:false})} IST`); return lines.join("\n");
+}
+
+function buildGoldaraWaitingMessage(x) {
+  const s=x?.SIGNAL||{},b=x?.SETUPS?.BUY||{},s2=x?.SETUPS?.SELL||{};
+  return ["â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”","ðŸŸ¡ GOLDARA SPECIAL SCAN","â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”","",`Status: ${s.status||"WAITING"}`,`Price: ${x?.currentPrice??"N/A"}`,`BUY score: ${b.score??0}/12`,`SELL score: ${s2.score??0}/12`,`1H: ${x?.MTF?.["1H"]||"N/A"}`,`15M: ${x?.MTF?.["15M"]||"N/A"}`,`5M: ${x?.MTF?.["5M"]||"N/A"}`,"","No confirmed Goldara signal at this moment.","This separate engine will alert only when its required conditions are met."].join("\n");
+}
+
+async function runGoldaraMonitor(){
+  if(!goldaraMonitorEnabled||goldaraMonitorBusy)return; goldaraMonitorBusy=true;
+  try{const x=await goldaraScan();goldaraLastError=null;const s=x.SIGNAL||{};if(s.ready&&s.direction&&x.TRADE_LEVELS){const key=`${s.direction}:${x.TRADE_LEVELS.entry}:${x.generatedAt.slice(0,16)}`;if(key!==goldaraLastSignalKey&&Date.now()-goldaraLastSignalSentAt>=GOLDARA_SIGNAL_COOLDOWN_MS){const result=await sendTelegramMessage(buildGoldaraTelegramMessage(x));goldaraLastTelegram=result;if(result?.sent){goldaraLastSignalKey=key;goldaraLastSignalSentAt=Date.now();}}}}catch(e){goldaraLastError=e.message;}finally{goldaraMonitorBusy=false;}
+}
+setTimeout(runGoldaraMonitor,20000);
+setInterval(runGoldaraMonitor,GOLDARA_MONITOR_MS);
+
 let telegramUpdateOffset = 0;
 let telegramPollingRunning = false;
 let telegramLastPollAt = null;
@@ -4519,6 +4649,15 @@ function telegramCommandHelp() {
     "/startmonitor â€” Start 60s trendline monitor",
     "/stopmonitor â€” Stop 60s trendline monitor",
     "/telegramtest â€” Test outgoing Telegram",
+    "",
+    "â­ GOLDARA SPECIAL SIGNALS",
+    "/goldara_help â€” Goldara commands",
+    "/goldara â€” Fresh Goldara scan",
+    "/goldara_signal â€” Fresh Goldara signal only",
+    "/goldara_status â€” Goldara engine status",
+    "/goldara_start â€” Start Goldara auto alerts",
+    "/goldara_stop â€” Stop Goldara auto alerts",
+    "/goldara_volume â€” Goldara 5M volume",
     "",
     "Instrument: XAUUSD",
     "Timeframes: 1H / 15M / 5M",
@@ -4583,6 +4722,32 @@ async function handleTelegramCommand(message) {
   if (!command) return;
 
   try {
+    if (command === "/goldara_help") {
+      await sendTelegramMessage(["â­ GOLDARA SPECIAL SIGNAL ENGINE","","/goldara â€” Fresh Goldara scan","/goldara_signal â€” Signal/WAITING result","/goldara_status â€” Engine + last signal status","/goldara_start â€” Start automatic Goldara alerts","/goldara_stop â€” Stop automatic Goldara alerts","/goldara_volume â€” Current 5M volume","","Strategy: MTF trend + 15M structure + BOS/CHoCH + fresh 5M displacement BOS + liquidity + FVG/OB + momentum + candle confirmation.","Mode: Telegram signal only â€” no trade execution by this Goldara layer."].join("\n"));
+      return;
+    }
+    if (command === "/goldara" || command === "/goldara_signal") {
+      const x=await goldaraScan();
+      await sendTelegramMessage(x?.SIGNAL?.ready&&x?.TRADE_LEVELS?buildGoldaraTelegramMessage(x):buildGoldaraWaitingMessage(x));
+      return;
+    }
+    if (command === "/goldara_status") {
+      const s=goldaraLastScan?.SIGNAL||{},l=goldaraLastScan?.TRADE_LEVELS||{};
+      await sendTelegramMessage(["â­ GOLDARA STATUS","",`Auto alerts: ${goldaraMonitorEnabled?"ON":"OFF"}`,`Monitor busy: ${goldaraMonitorBusy?"YES":"NO"}`,`Last scan: ${goldaraLastScan?.generatedAt||"N/A"}`,`Last Telegram: ${goldaraLastTelegram?.sent?"SENT":"N/A"}`,`Last error: ${goldaraLastError||"None"}`,"",`Signal: ${s.status||"WAITING"}`,`Direction: ${s.direction||"None"}`,`Score: ${s.score??0}/${s.maxScore??12}`,`Entry: ${l.entry??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,`TP1: ${l.takeProfit?.TP1??"N/A"}`,`TP2: ${l.takeProfit?.TP2??"N/A"}`,`TP3: ${l.takeProfit?.TP3??"N/A"}`].join("\n"));
+      return;
+    }
+    if (command === "/goldara_start") {
+      goldaraMonitorEnabled=true; setTimeout(runGoldaraMonitor,0);
+      await sendTelegramMessage("â–¶ï¸ GOLDARA SPECIAL AUTO ALERTS STARTED.\n\nScan interval: 60 seconds."); return;
+    }
+    if (command === "/goldara_stop") {
+      goldaraMonitorEnabled=false;
+      await sendTelegramMessage("â¹ï¸ GOLDARA SPECIAL AUTO ALERTS STOPPED.\n\nUse /goldara_start to resume."); return;
+    }
+    if (command === "/goldara_volume") {
+      try{const c=await getCandles(TF["5M"],100),v=c.map(x=>x.volume).filter(Number.isFinite);if(v.length<20){await sendTelegramMessage("âš ï¸ Goldara 5M volume data unavailable.");return;}const current=last(v),average=avg(v.slice(-20)),ratio=average?current/average:null,state=ratio==null?"Unknown":ratio>=1.5?"HIGH VOLUME":ratio>=1.1?"ABOVE AVERAGE":ratio<=0.7?"LOW VOLUME":"Normal";await sendTelegramMessage(["â­ GOLDARA 5M VOLUME","",`Current: ${round(current,2)}`,`20-candle average: ${round(average,2)}`,`Ratio: ${ratio==null?"N/A":round(ratio,2)+"x"}`,`State: ${state}`].join("\n"));}catch(e){await sendTelegramMessage(`âŒ Goldara volume error: ${e.message}`);} return;
+    }
+
     if (command === "/help" || command === "/start") {
       await sendTelegramMessage(telegramCommandHelp());
       return;
@@ -4712,6 +4877,9 @@ async function telegramCommandLoop() {
 }
 
 telegramCommandLoop();
+
+app.get("/goldara-signal",async(req,res)=>{try{res.json(await goldaraScan());}catch(e){res.status(500).json({success:false,error:e.message});}});
+app.get("/goldara-status",(req,res)=>res.json({success:true,instrument:OUTPUT_SYMBOL,engine:"GOLDARA_STYLE_SMC_SIGNAL",mode:"TELEGRAM_SIGNAL_ONLY",autoMonitorEnabled:goldaraMonitorEnabled,monitorBusy:goldaraMonitorBusy,lastScan:goldaraLastScan?.generatedAt||null,lastTelegram:goldaraLastTelegram,lastError:goldaraLastError,signal:goldaraLastScan?.SIGNAL||null,tradeLevels:goldaraLastScan?.TRADE_LEVELS||null}));
 
 /* =========================================================
    HTTP STATUS DIAGNOSTIC
