@@ -5118,6 +5118,16 @@ app.get("/hf/decision", async (req, res) => {
   if (!hfAuthorized(req)) return res.status(401).json({success:false,error:"Unauthorized"});
   const bid = Number(req.query?.bid);
   const ask = Number(req.query?.ask);
+
+  // Treat a valid decision request carrying live prices as a live HF tick too.
+  // This GET path avoids browser CORS preflight caused by JSON POST requests.
+  if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) {
+    HF_STATE.ticks++;
+    HF_STATE.lastTickAt = new Date().toISOString();
+    HF_STATE.lastBid = bid;
+    HF_STATE.lastAsk = ask;
+  }
+
   const decision = await buildHFDecision(bid, ask);
   res.json(decision);
 });
