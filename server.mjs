@@ -4494,6 +4494,256 @@ setInterval(
   60 * 60 * 1000
 );
 /* =========================================================
+   TELEGRAM COMMAND SYSTEM
+   Incoming Telegram commands via getUpdates.
+   Restricted to TELEGRAM_CHAT_ID and safe read/monitor controls.
+========================================================= */
+let telegramUpdateOffset = 0;
+let telegramPollingRunning = false;
+let telegramLastPollAt = null;
+let telegramLastPollError = null;
+let telegramCommandTimer = null;
+let telegramTrendlineMonitorEnabled = true;
+
+function telegramCommandHelp() {
+  return [
+    "ðŸ¤– XAUUSD AI BOT â€” COMMANDS",
+    "",
+    "/help â€” Show all commands",
+    "/start â€” Bot online status + commands",
+    "/status â€” Bot/Telegram/monitor status",
+    "/health â€” Data + engine health",
+    "/signal â€” Fresh XAUUSD signal analysis",
+    "/analyze â€” Full fresh MTF analysis",
+    "/trendline â€” Fresh trendline analysis",
+    "/startmonitor â€” Start 60s trendline monitor",
+    "/stopmonitor â€” Stop 60s trendline monitor",
+    "/telegramtest â€” Test outgoing Telegram",
+    "",
+    "Instrument: XAUUSD",
+    "Timeframes: 1H / 15M / 5M",
+    "Signals are sent only when the engine's confirmation rules are met."
+  ].join("\n");
+}
+
+function telegramCommandAllowed(message) {
+  const incoming = String(message?.chat?.id ?? "");
+  return !!incoming && incoming === String(TELEGRAM_CHAT_ID);
+}
+
+function telegramCommandName(text) {
+  return String(text ?? "")
+    .trim()
+    .split(/\s+/)[0]
+    .split("@")[0]
+    .toLowerCase();
+}
+
+function telegramSignalSummary(mtf) {
+  const e = mtf?.ENTRY_CONFIRMATION || {};
+  const levels = mtf?.TRADE_LEVELS || null;
+  const lines = [
+    "ðŸ“¡ XAUUSD SIGNAL",
+    "",
+    `Status: ${e.status || "WAITING"}`,
+    `Direction: ${e.direction || "None"}`,
+    `Bull Score: ${e.bullishScore ?? 0}`,
+    `Bear Score: ${e.bearishScore ?? 0}`,
+    "",
+    `1H: ${mtf?.MTF?.["1H"] || "N/A"}`,
+    `15M: ${mtf?.MTF?.["15M"] || "N/A"}`,
+    `5M: ${mtf?.MTF?.["5M"] || "N/A"}`,
+    `Alignment: ${mtf?.MTF?.alignment || "N/A"}`
+  ];
+  if (levels) {
+    lines.push(
+      "",
+      "TRADE LEVELS",
+      `Entry: ${levels.entry ?? "N/A"}`,
+      `SL: ${levels.stopLoss ?? "N/A"}`,
+      `TP1: ${levels.takeProfit?.TP1_1R ?? "N/A"}`,
+      `TP2: ${levels.takeProfit?.TP2_1_5R ?? "N/A"}`,
+      `TP3: ${levels.takeProfit?.TP3_2R ?? "N/A"}`
+    );
+  } else {
+    lines.push("", "No confirmed trade levels right now.");
+  }
+  if (e.bullishReasons?.length) {
+    lines.push("", "BULLISH", ...e.bullishReasons.slice(0, 6).map(x => `â€¢ ${x}`));
+  }
+  if (e.bearishReasons?.length) {
+    lines.push("", "BEARISH", ...e.bearishReasons.slice(0, 6).map(x => `â€¢ ${x}`));
+  }
+  return lines.join("\n");
+}
+
+async function handleTelegramCommand(message) {
+  if (!telegramCommandAllowed(message)) return;
+  const command = telegramCommandName(message?.text);
+  if (!command) return;
+
+  try {
+    if (command === "/help" || command === "/start") {
+      await sendTelegramMessage(telegramCommandHelp());
+      return;
+    }
+
+    if (command === "/status") {
+      await sendTelegramMessage([
+        "ðŸ“Š XAUUSD BOT STATUS",
+        "",
+        `Telegram configured: ${TELEGRAM_BOT_TOKEN ? "YES" : "NO"}`,
+        `Telegram polling: ${telegramPollingRunning ? "RUNNING" : "READY"}`,
+        `Last Telegram poll: ${telegramLastPollAt || "N/A"}`,
+        `Poll error: ${telegramLastPollError || "None"}`,
+        `Trendline monitor: ${telegramTrendlineMonitorEnabled ? "ON" : "OFF"}`,
+        `Trendline running: ${trendlineMonitorRunning ? "YES" : "NO"}`,
+        `Last trendline scan: ${lastTrendlineMonitorFinishedAt || "N/A"}`,
+        `Last trendline error: ${lastTrendlineMonitorError || "None"}`,
+        `Last trendline signal: ${lastTrendlineMonitorSignal?.status || "N/A"}`,
+        `Last trendline Telegram: ${lastTrendlineTelegramResult?.sent ? "SENT" : "N/A"}`,
+        `HF ticks: ${HF_STATE?.ticks ?? 0}`,
+        `HF last error: ${HF_STATE?.lastError || "None"}`
+      ].join("\n"));
+      return;
+    }
+
+    if (command === "/health") {
+      const checks = [];
+      try {
+        const candles = await getCandles(TF["5M"], 80);
+        checks.push(`5M candles: ${candles.length >= 60 ? "OK" : "LOW"} (${candles.length})`);
+      } catch (e) {
+        checks.push(`5M candles: ERROR â€” ${e.message}`);
+      }
+      checks.push(`Telegram token: ${TELEGRAM_BOT_TOKEN ? "OK" : "MISSING"}`);
+      checks.push(`Telegram chat ID: ${TELEGRAM_CHAT_ID ? "OK" : "MISSING"}`);
+      checks.push(`Trendline monitor: ${telegramTrendlineMonitorEnabled ? "ON" : "OFF"}`);
+      checks.push(`HF engine: ${HF_STATE ? "LOADED" : "MISSING"}`);
+      await sendTelegramMessage("ðŸ©º XAUUSD HEALTH\n\n" + checks.join("\n"));
+      return;
+    }
+
+    if (command === "/signal" || command === "/analyze") {
+      const mtf = await mtfAnalysis();
+      await sendTelegramMessage(telegramSignalSummary(mtf));
+      return;
+    }
+
+    if (command === "/trendline") {
+      const [candles1H, candles15M, candles5M] = await Promise.all([
+        getCandles(TF["1H"], 350),
+        getCandles(TF["15M"], 350),
+        getCandles(TF["5M"], 350)
+      ]);
+      const result = trendlineAnalysis(candles1H, candles15M, candles5M);
+      const primary = result?.TRENDLINE_SIGNAL || {};
+      const levels = result?.TRADE_LEVELS || {};
+      const lines = [
+        "ðŸ“ˆ XAUUSD TRENDLINE",
+        "",
+        `Status: ${primary.status || "WAITING"}`,
+        `Direction: ${primary.direction || "None"}`,
+        `Score: ${primary.score ?? 0}/${primary.maxScore ?? 11}`,
+        `Timeframe: ${primary.signalTimeframe || "5M"}`,
+        `Price: ${result?.currentPrice ?? "N/A"}`,
+        `Entry: ${levels.entry ?? "N/A"}`,
+        `SL: ${levels.stopLoss ?? "N/A"}`,
+        `TP1: ${levels.takeProfit?.TP1 ?? levels.takeProfit?.TP1_1R ?? "N/A"}`
+      ];
+      await sendTelegramMessage(lines.join("\n"));
+      return;
+    }
+
+    if (command === "/startmonitor") {
+      telegramTrendlineMonitorEnabled = true;
+      if (typeof monitorTrendlineSignal === "function") {
+        setTimeout(monitorTrendlineSignal, 0);
+      }
+      await sendTelegramMessage("âœ… Trendline monitor STARTED.\n\nAutomatic scan interval: 60 seconds.");
+      return;
+    }
+
+    if (command === "/stopmonitor") {
+      telegramTrendlineMonitorEnabled = false;
+      await sendTelegramMessage("ðŸ›‘ Trendline monitor STOPPED.\n\nNo automatic trendline scans will run until /startmonitor.");
+      return;
+    }
+
+    if (command === "/telegramtest") {
+      const result = await sendTelegramMessage("âœ… Telegram command system is working.\n\nXAUUSD bot can receive and send commands.");
+      if (!result?.sent) console.log("Telegram command test failed:", result);
+      return;
+    }
+
+    await sendTelegramMessage("â“ Unknown command. Send /help");
+  } catch (error) {
+    telegramLastPollError = error.message;
+    await sendTelegramMessage(`âŒ Command ${command} failed\n\n${error.message}`);
+  }
+}
+
+async function pollTelegramCommands() {
+  if (telegramPollingRunning || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  telegramPollingRunning = true;
+  telegramLastPollAt = new Date().toISOString();
+  try {
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=${telegramUpdateOffset}&timeout=0&allowed_updates=${encodeURIComponent(JSON.stringify(["message"]))}`;
+    const response = await fetch(url);
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.description || "Telegram getUpdates failed");
+
+    for (const update of data.result || []) {
+      telegramUpdateOffset = Math.max(telegramUpdateOffset, Number(update.update_id) + 1);
+      await handleTelegramCommand(update.message);
+    }
+    telegramLastPollError = null;
+  } catch (error) {
+    telegramLastPollError = error.message;
+    console.log("Telegram command polling error:", error.message);
+  } finally {
+    telegramPollingRunning = false;
+  }
+}
+
+async function telegramCommandLoop() {
+  await pollTelegramCommands();
+  telegramCommandTimer = setTimeout(telegramCommandLoop, 3000);
+}
+
+telegramCommandLoop();
+
+/* =========================================================
+   HTTP STATUS DIAGNOSTIC
+========================================================= */
+app.get("/status", (req, res) => {
+  res.json({
+    success: true,
+    instrument: OUTPUT_SYMBOL,
+    telegram: {
+      configured: !!TELEGRAM_BOT_TOKEN,
+      chatConfigured: !!TELEGRAM_CHAT_ID,
+      polling: telegramPollingRunning,
+      lastPollAt: telegramLastPollAt,
+      lastPollError: telegramLastPollError
+    },
+    trendlineMonitor: {
+      enabled: telegramTrendlineMonitorEnabled,
+      running: trendlineMonitorRunning,
+      lastStartedAt: lastTrendlineMonitorStartedAt,
+      lastFinishedAt: lastTrendlineMonitorFinishedAt,
+      lastDurationMs: lastTrendlineMonitorDurationMs,
+      lastError: lastTrendlineMonitorError,
+      lastSignal: lastTrendlineMonitorSignal,
+      lastDecision: lastTrendlineMonitorDecision,
+      lastTelegram: lastTrendlineTelegramResult
+    },
+    hf: HF_STATE
+  });
+
+});
+
+/* =========================================================
    AUTOMATIC TRENDLINE MONITOR
    Checks the confirmed trendline setup every 60 seconds.
 ========================================================= */
@@ -4552,6 +4802,7 @@ function buildDangerTelegramMessage(result,danger) {
 }
 
 async function monitorTrendlineSignal() {
+  if (!telegramTrendlineMonitorEnabled) return;
   if (trendlineMonitorRunning) { console.log("Trendline monitor skipped: previous run still active"); return; }
   trendlineMonitorRunning=true; lastTrendlineMonitorStartedAt=new Date().toISOString(); const startedAt=Date.now();
   try {
@@ -4646,6 +4897,7 @@ app.get(
         "/analyze",
         "/gemini-test",
         "/telegram-test",
+        "/status",
         "/trendline-analysis",
         "/trendline-monitor-status",
         "/hf/status",
