@@ -100,15 +100,47 @@ function levels(direction,a5){const price=a5.currentPrice,A=a5.ATR||0,s=a5.struc
 async function scan(){const [c1,c15,c5]=await Promise.all([getCandles(TF["1H"],350),getCandles(TF["15M"],350),getCandles(TF["5M"],350)]);const a1=analyze(c1,"1H"),a15=analyze(c15,"15M"),a5=analyze(c5,"5M");const buy=setup("BUY",a1,a15,a5),sell=setup("SELL",a1,a15,a5);const candidates=[];for(const s of [buy,sell])if(s.ready){const lv=levels(s.direction,a5);if(lv)candidates.push({...s,levels:lv});}
 candidates.sort((x,y)=>y.score-x.score);const chosen=candidates[0]||null;const result={success:true,instrument:OUTPUT_SYMBOL,generatedAt:new Date().toISOString(),currentPrice:r(a5.currentPrice,2),MTF:{"1H":a1.trend,"15M":a15.trend,"5M":a5.trend},STRUCTURE:{"1H":a1.structure.bias,"15M":a15.structure.bias,"5M":a5.structure.bias},SMC:{"15M":{BOS:a15.break.bos,CHoCH:a15.break.choch},"5M":{BOS:a5.break.bos,CHoCH:a5.break.choch,Liquidity:a5.liquidity.latestSweep}},SETUPS:{BUY:buy,SELL:sell},SIGNAL:chosen?{status:`${chosen.direction} CONFIRMED`,...chosen}: {status:"WAITING",direction:"None",score:Math.max(buy.score,sell.score),maxScore:12},TRADE_LEVELS:chosen?.levels||null};lastScan=result;return result;}
 
-function message(x){const s=x.SIGNAL||{};const l=x.TRADE_LEVELS||{};return `ðŸŸ¢ XAUUSD ${s.direction||""} SIGNAL\n\nEntry: ${l.entry??x.currentPrice}\nSL: ${l.stopLoss??"N/A"}\nTP1: ${l.takeProfit?.TP1??"N/A"}\nTP2: ${l.takeProfit?.TP2??"N/A"}\nTP3: ${l.takeProfit?.TP3??"N/A"}\nRR: ${l.rr??"N/A"}\n\nConfluence: ${s.score??0}/${s.maxScore??12}\n\n${(s.reasons||[]).map(z=>`âœ“ ${z}`).join("\n")}\n\n1H: ${x.MTF?.["1H"]}\n15M: ${x.MTF?.["15M"]}\n5M: ${x.MTF?.["5M"]}\n\nTime: ${new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata",hour12:false})} IST`}
+function message(x){const s=x.SIGNAL||{};const l=x.TRADE_LEVELS||{};return `Ã°Å¸Å¸Â¢ XAUUSD ${s.direction||""} SIGNAL\n\nEntry: ${l.entry??x.currentPrice}\nSL: ${l.stopLoss??"N/A"}\nTP1: ${l.takeProfit?.TP1??"N/A"}\nTP2: ${l.takeProfit?.TP2??"N/A"}\nTP3: ${l.takeProfit?.TP3??"N/A"}\nRR: ${l.rr??"N/A"}\n\nConfluence: ${s.score??0}/${s.maxScore??12}\n\n${(s.reasons||[]).map(z=>`Ã¢Å“â€œ ${z}`).join("\n")}\n\n1H: ${x.MTF?.["1H"]}\n15M: ${x.MTF?.["15M"]}\n5M: ${x.MTF?.["5M"]}\n\nTime: ${new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata",hour12:false})} IST`}
 
-async function monitor(){if(monitorBusy)return;monitorBusy=true;try{const x=await scan();lastError=null;const s=x.SIGNAL;if(s?.direction&&s.direction!=="None"&&x.TRADE_LEVELS){const candleTime=x.generatedAt.slice(0,16);const key=`${s.direction}:${x.TRADE_LEVELS.entry}:${candleTime}`;if(key!==lastSignalKey&&Date.now()-lastSignalSentAt>=SIGNAL_COOLDOWN_MS){lastTelegram=await telegram(message(x));if(lastTelegram.sent){lastSignalKey=key;lastSignalSentAt=Date.now();}}}}catch(e){lastError=e.message;}finally{monitorBusy=false;}}
+// ================= TELEGRAM COMMAND SYSTEM =================
+let telegramOffset = 0;
+let telegramPolling = false;
+let autoMonitorEnabled = true;
+let telegramPollError = null;
+
+async function telegramApi(method, body = {}) {
+  if (!TELEGRAM_BOT_TOKEN) return { ok:false, description:"TELEGRAM_BOT_TOKEN missing" };
+  const q = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  return await q.json();
+}
+
+async function telegramCommand(command) {
+  const cmd = String(command || "").trim().split(/\s+/)[0].toLowerCase();
+  if (cmd === "/help" || cmd === "/start") return `ðŸ¤– XAUUSD GOLDARA BOT\n\nCommands:\n/help - Show all commands\n/start - Start automatic signal monitoring\n/stop - Stop automatic signal monitoring\n/status - Bot and latest signal status\n/signal - Run a fresh signal scan\n/analyze - Run fresh market analysis\n/volume - Show current 5M volume analysis\n\nMode: Telegram Signal Only\nInstrument: XAUUSD`;
+  if (cmd === "/stop") { autoMonitorEnabled=false; return "â¹ï¸ Automatic signal monitoring STOPPED.\n\nUse /start to resume."; }
+  if (cmd === "/start") { autoMonitorEnabled=true; return "â–¶ï¸ Automatic signal monitoring STARTED.\n\nXAUUSD Goldara monitoring is active."; }
+  if (cmd === "/status") { const s=lastScan?.SIGNAL||{},l=lastScan?.TRADE_LEVELS||{}; return `ðŸ“Š XAUUSD STATUS\n\nAuto Monitor: ${autoMonitorEnabled?"ON":"OFF"}\nMonitor Busy: ${monitorBusy?"YES":"NO"}\nLast Scan: ${lastScan?.generatedAt||"N/A"}\nLast Telegram: ${lastTelegram?.sent?"SENT":"N/A"}\nLast Error: ${lastError||"None"}\n\nSignal: ${s.status||"WAITING"}\nDirection: ${s.direction||"None"}\nScore: ${s.score??0}/${s.maxScore??12}\nEntry: ${l.entry??"N/A"}\nSL: ${l.stopLoss??"N/A"}\nTP1: ${l.takeProfit?.TP1??"N/A"}\nTP2: ${l.takeProfit?.TP2??"N/A"}\nTP3: ${l.takeProfit?.TP3??"N/A"}`; }
+  if (cmd === "/signal" || cmd === "/analyze") { try { const x=await scan(),s=x.SIGNAL||{}; return s.direction&&s.direction!=="None"&&x.TRADE_LEVELS ? message(x) : `â³ XAUUSD WAITING\n\nScore: ${s.score??0}/${s.maxScore??12}\n1H: ${x.MTF?.["1H"]||"N/A"}\n15M: ${x.MTF?.["15M"]||"N/A"}\n5M: ${x.MTF?.["5M"]||"N/A"}\n\nNo confirmed signal at this moment.`; } catch(e) { return `âŒ Analysis error: ${e.message}`; } }
+  if (cmd === "/volume") { try { const c=await getCandles(TF["5M"],100),v=c.map(x=>x.volume).filter(Number.isFinite); if(v.length<20)return "âš ï¸ Volume data unavailable."; const current=last(v),average=avg(v.slice(-20)),ratio=average?current/average:null,state=ratio==null?"Unknown":ratio>=1.5?"ðŸ”¥ HIGH VOLUME":ratio>=1.1?"ðŸ“ˆ ABOVE AVERAGE":ratio<=.7?"ðŸ“‰ LOW VOLUME":"Normal"; return `ðŸ“Š XAUUSD 5M VOLUME\n\nCurrent: ${r(current,2)}\n20-Candle Average: ${r(average,2)}\nVolume Ratio: ${ratio==null?"N/A":r(ratio,2)+"x"}\nStatus: ${state}`; } catch(e) { return `âŒ Volume error: ${e.message}`; } }
+  return "â“ Unknown command. Send /help";
+}
+
+async function pollTelegramCommands() {
+  if (telegramPolling || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  telegramPolling=true;
+  try { const j=await telegramApi("getUpdates",{offset:telegramOffset,timeout:0,allowed_updates:["message"]}); if(!j.ok)throw new Error(j.description||"Telegram getUpdates failed"); for(const update of (j.result||[])){telegramOffset=update.update_id+1;const msg=update.message;if(!msg?.text)continue;if(String(msg.chat?.id)!==String(TELEGRAM_CHAT_ID))continue;await telegram(await telegramCommand(msg.text));} telegramPollError=null; } catch(e) { telegramPollError=e.message; } finally { telegramPolling=false; }
+}
+setInterval(pollTelegramCommands,3000);
+setTimeout(pollTelegramCommands,3000);
+// ================= END TELEGRAM COMMAND SYSTEM =================
+
+async function monitor(){if(!autoMonitorEnabled||monitorBusy)return;monitorBusy=true;try{const x=await scan();lastError=null;const s=x.SIGNAL;if(s?.direction&&s.direction!=="None"&&x.TRADE_LEVELS){const candleTime=x.generatedAt.slice(0,16);const key=`${s.direction}:${x.TRADE_LEVELS.entry}:${candleTime}`;if(key!==lastSignalKey&&Date.now()-lastSignalSentAt>=SIGNAL_COOLDOWN_MS){lastTelegram=await telegram(message(x));if(lastTelegram.sent){lastSignalKey=key;lastSignalSentAt=Date.now();}}}}catch(e){lastError=e.message;}finally{monitorBusy=false;}}
 
 setTimeout(monitor,5000);setInterval(monitor,MONITOR_MS);
 
 app.get("/",(req,res)=>res.json({success:true,bot:"XAUUSD Goldara-Style SMC Telegram Signal Engine",instrument:OUTPUT_SYMBOL,mode:"TELEGRAM_SIGNAL_ONLY",execution:false,autoTrade:false,timeframes:["1H","15M","5M"],monitorSeconds:MONITOR_MS/1000,features:["MTF trend","BOS/CHoCH","liquidity sweep","FVG","order blocks","momentum","candlestick confirmation","ATR structural SL","1.5R/2R/2.5R TP","duplicate protection"]}));
 app.get("/signal",async(req,res)=>{try{res.json(await scan());}catch(e){res.status(500).json({success:false,error:e.message});}});
 app.get("/analyze",async(req,res)=>{try{res.json(await scan());}catch(e){res.status(500).json({success:false,error:e.message});}});
-app.get("/status",(req,res)=>res.json({success:true,instrument:OUTPUT_SYMBOL,mode:"TELEGRAM_SIGNAL_ONLY",monitorRunning:monitorBusy,lastScan:lastScan?.generatedAt||null,lastSignalSentAt:lastSignalSentAt?new Date(lastSignalSentAt).toISOString():null,lastTelegram,lastError,signal:lastScan?.SIGNAL||null,tradeLevels:lastScan?.TRADE_LEVELS||null}));
+app.get("/status",(req,res)=>res.json({success:true,instrument:OUTPUT_SYMBOL,mode:"TELEGRAM_SIGNAL_ONLY",autoMonitorEnabled,telegramPolling,telegramPollError,monitorRunning:monitorBusy,lastScan:lastScan?.generatedAt||null,lastSignalSentAt:lastSignalSentAt?new Date(lastSignalSentAt).toISOString():null,lastTelegram,lastError,signal:lastScan?.SIGNAL||null,tradeLevels:lastScan?.TRADE_LEVELS||null}));
 app.get("/telegram-test",async(req,res)=>res.json({success:true,telegram:await telegram("XAUUSD SIGNAL BOT\n\nTelegram connection successful.\n\nMode: Signal Only") }));
 app.listen(PORT,()=>console.log(`XAUUSD Goldara-style signal server listening on ${PORT}`));
