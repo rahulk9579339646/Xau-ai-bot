@@ -5009,6 +5009,171 @@ function hfAuthorized(req) {
   return String(req.headers["x-hf-secret"] || "") === HF_SECRET;
 }
 
+function hfNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function hfClamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function buildHFRiskLevels(direction, price, analysis) {
+  const a5 = analysis?.analysis?.["5M"] || {};
+  const atr = hfNumber(a5?.indicators?.ATR14);
+  const sr = a5?.supportResistance || {};
+  const safeAtr = atr && atr > 0 ? atr : 3.0;
+
+  // Momentum scalping: keep SL tied to current volatility, but never absurdly tight.
+  const risk = hfClamp(safeAtr * 0.85, 2.0, 7.5);
+  const entry = hfNumber(price);
+  if (!entry) return null;
+
+  let stopLoss;
+  let takeProfit;
+
+  if (direction === "BUY") {
+    const structuralSL = hfNumber(sr.support);
+    stopLoss = structuralSL && structuralSL < entry && entry - structuralSL <= risk * 1.8
+      ? structuralSL - Math.min(safeAtr * 0.10, 0.5)
+      : entry - risk;
+    const actualRisk = Math.max(entry - stopLoss, 0.1);
+    takeProfit = entry + actualRisk * 1.55;
+  } else {
+    const structuralSL = hfNumber(sr.resistance);
+    stopLoss = structuralSL && structuralSL > entry && structuralSL - entry <= risk * 1.8
+      ? structuralSL + Math.min(safeAtr * 0.10, 0.5)
+      : entry + risk;
+    const actualRisk = Math.max(stopLoss - entry, 0.1);
+    takeProfit = entry - actualRisk * 1.55;
+  }
+
+  return {
+    entry: Number(entry.toFixed(5)),
+    stopLoss: Number(stopLoss.toFixed(5)),
+    takeProfit: {
+      TP1: Number(takeProfit.toFixed(5))
+    },
+    riskDistance: Number(Math.abs(entry - stopLoss).toFixed(5)),
+    rrr: 1.55,
+    source: "HF_ADAPTIVE_VOLATILITY"
+  };
+}
+
+function buildAdaptiveHFSignal(mtf, bid, ask) {
+  const entry = mtf?.ENTRY_CONFIRMATION || {};
+  const a1 = mtf?.analysis?.["1H"] || {};
+  const a15 = mtf?.analysis?.["15M"] || {};
+  const a5 = mtf?.analysis?.["5M"] || {};
+  const trendline = mtf?.TRENDLINE_ANALYSIS || {};
+  const tlBuy = Number(trendline?.TRENDLINE_SCORE?.BUY?.score || 0);
+  const tlSell = Number(trendline?.TRENDLINE_SCORE?.SELL?.score || 0);
+  const price = Number.isFinite(bid) && Number.isFinite(ask) ? (bid + ask) / 2 : hfNumber(a5.currentPrice);
+
+  let buy = Number(entry.bullishScore || 0);
+  let sell = Number(entry.bearishScore || 0);
+  const buyReasons = [...(entry.bullishReasons || [])];
+  const sellReasons = [...(entry.bearishReasons || [])];
+
+  const buyTrigger = [];
+  const sellTrigger = [];
+
+  // Trendline evidence is intentionally powerful for momentum capture, but not sufficient alone.
+  if (tlBuy >= 7) { buy += 3; buyReasons.push(`Trendline BUY momentum ${tlBuy}/11`); buyTrigger.push("trendline"); }
+  else if (tlBuy >= 5) { buy += 2; buyReasons.push(`Trendline BUY setup ${tlBuy}/11`); }
+  if (tlSell >= 7) { sell += 3; sellReasons.push(`Trendline SELL momentum ${tlSell}/11`); sellTrigger.push("trendline"); }
+  else if (tlSell >= 5) { sell += 2; sellReasons.push(`Trendline SELL setup ${tlSell}/11`); }
+
+  const fiveSweep = a5?.liquidity?.latestSweep || "";
+  if (fiveSweep === "Bullish Liquidity Sweep") { buy += 2; buyReasons.push("5M bullish liquidity sweep"); buyTrigger.push("liquidity"); }
+  if (fiveSweep === "Bearish Liquidity Sweep") { sell += 2; sellReasons.push("5M bearish liquidity sweep"); sellTrigger.push("liquidity"); }
+
+  const fiveCandle = a5?.candle || {};
+  if (fiveCandle?.displacement === "Strong" || fiveCandle?.displacement === true || fiveCandle?.strength === "Strong") {
+    if (fiveCandle.direction === "Bullish") { buy += 2; buyReasons.push("5M bullish displacement"); buyTrigger.push("displacement"); }
+    if (fiveCandle.direction === "Bearish") { sell += 2; sellReasons.push("5M bearish displacement"); sellTrigger.push("displacement"); }
+  }
+
+  const macd5 = a5?.indicators?.MACD?.bias;
+  const rsi5 = Number(a5?.indicators?.RSI14);
+  if (macd5 === "Bullish" && rsi5 >= 52) { buy += 1; buyReasons.push("5M momentum aligned"); }
+  if (macd5 === "Bearish" && rsi5 <= 48) { sell += 1; sellReasons.push("5M momentum aligned"); }
+
+  const trend1 = a1?.trend;
+  const trend15 = a15?.trend;
+  const trend5 = a5?.trend;
+  if (trend1 === "Bullish" && trend15 === "Bullish") { buy += 2; buyReasons.push("1H+15M trend alignment"); }
+  if (trend1 === "Bearish" && trend15 === "Bearish") { sell += 2; sellReasons.push("1H+15M trend alignment"); }
+  if (trend15 === "Bullish" && trend5 === "Bullish") { buy += 1; buyReasons.push("15M+5M trend alignment"); }
+  if (trend15 === "Bearish" && trend5 === "Bearish") { sell += 1; sellReasons.push("15M+5M trend alignment"); }
+
+  const bullishBreak = a5?.breakDirection === "Bullish" || a15?.breakDirection === "Bullish";
+  const bearishBreak = a5?.breakDirection === "Bearish" || a15?.breakDirection === "Bearish";
+  if (bullishBreak) { buy += 2; buyReasons.push("Structure break available"); buyTrigger.push("structure"); }
+  if (bearishBreak) { sell += 2; sellReasons.push("Structure break available"); sellTrigger.push("structure"); }
+
+  // Avoid chasing an exhausted move. Strong opposite structure cancels a weak setup.
+  const spread = Number.isFinite(bid) && Number.isFinite(ask) ? ask - bid : null;
+  const atr = Number(a5?.indicators?.ATR14 || 0);
+  const spreadOK = spread === null || atr <= 0 || spread <= atr * 0.20;
+  if (!spreadOK) {
+    return {
+      signal: "WAIT",
+      status: "SPREAD_BLOCK",
+      bullishScore: buy,
+      bearishScore: sell,
+      bullishReasons: buyReasons,
+      bearishReasons: sellReasons,
+      executionAllowed: false,
+      trigger: null,
+      spread,
+      price
+    };
+  }
+
+  const margin = Math.abs(buy - sell);
+  let signal = "WAIT";
+  let status = "WAITING";
+  let trigger = null;
+
+  // Adaptive confirmation: at least one real trigger + sufficient evidence + directional separation.
+  if (buy >= 9 && margin >= 2 && buyTrigger.length > 0) {
+    signal = "BUY";
+    status = "BUY CONFIRMED";
+    trigger = [...new Set(buyTrigger)];
+  } else if (sell >= 9 && margin >= 2 && sellTrigger.length > 0) {
+    signal = "SELL";
+    status = "SELL CONFIRMED";
+    trigger = [...new Set(sellTrigger)];
+  } else if (buy >= 7 && margin >= 3 && buyTrigger.length > 0) {
+    signal = "BUY";
+    status = "BUY MOMENTUM CONFIRMED";
+    trigger = [...new Set(buyTrigger)];
+  } else if (sell >= 7 && margin >= 3 && sellTrigger.length > 0) {
+    signal = "SELL";
+    status = "SELL MOMENTUM CONFIRMED";
+    trigger = [...new Set(sellTrigger)];
+  } else if (buy >= 6 && buy > sell + 2) {
+    status = "BUY SETUP";
+  } else if (sell >= 6 && sell > buy + 2) {
+    status = "SELL SETUP";
+  }
+
+  return {
+    signal,
+    status,
+    bullishScore: buy,
+    bearishScore: sell,
+    bullishReasons: [...new Set(buyReasons)],
+    bearishReasons: [...new Set(sellReasons)],
+    executionAllowed: signal === "BUY" || signal === "SELL",
+    trigger,
+    spread,
+    price,
+    margin
+  };
+}
+
 async function buildHFDecision(bid, ask) {
   const now = Date.now();
   if (hfCachedDecision && now - hfCachedDecisionAt < HF_DECISION_CACHE_MS) {
@@ -5017,6 +5182,8 @@ async function buildHFDecision(bid, ask) {
       currentPrice: Number.isFinite(bid) && Number.isFinite(ask)
         ? (bid + ask) / 2
         : hfCachedDecision.currentPrice,
+      bid: Number.isFinite(bid) ? bid : hfCachedDecision.bid,
+      ask: Number.isFinite(ask) ? ask : hfCachedDecision.ask,
       cached: true
     };
   }
@@ -5028,30 +5195,42 @@ async function buildHFDecision(bid, ask) {
   HF_STATE.decisionRunning = true;
   try {
     const mtf = await mtfAnalysis();
-    const entry = mtf?.ENTRY_CONFIRMATION || {};
-    const levels = mtf?.TRADE_LEVELS || null;
-    const direction = entry.direction === "BUY" || entry.direction === "SELL"
-      ? entry.direction
+    const adaptive = buildAdaptiveHFSignal(mtf, bid, ask);
+    const direction = adaptive.signal === "BUY" || adaptive.signal === "SELL"
+      ? adaptive.signal
       : "WAIT";
 
-    // Only the deterministic engine's confirmed signal can trigger execution.
-    // AI analysis remains available through /analyze and Telegram and does not
-    // get allowed to invent an order direction.
+    let levels = null;
+    if (direction !== "WAIT") {
+      levels = mtf?.TRADE_LEVELS || null;
+      if (!levels?.stopLoss && !levels?.sl) {
+        levels = buildHFRiskLevels(direction, adaptive.price, mtf);
+      }
+    } else {
+      levels = mtf?.TRADE_LEVELS || null;
+    }
+
     const decision = {
       success: true,
       instrument: "XAUUSD",
       generatedAt: new Date().toISOString(),
-      currentPrice: Number.isFinite(bid) && Number.isFinite(ask) ? (bid + ask) / 2 : null,
+      currentPrice: adaptive.price,
       bid: Number.isFinite(bid) ? bid : null,
       ask: Number.isFinite(ask) ? ask : null,
       signal: direction,
-      status: entry.status || "WAITING",
-      bullishScore: entry.bullishScore ?? 0,
-      bearishScore: entry.bearishScore ?? 0,
-      reasons: direction === "BUY" ? (entry.bullishReasons || []) : direction === "SELL" ? (entry.bearishReasons || []) : [],
+      status: adaptive.status,
+      bullishScore: adaptive.bullishScore,
+      bearishScore: adaptive.bearishScore,
+      reasons: direction === "BUY" ? adaptive.bullishReasons : direction === "SELL" ? adaptive.bearishReasons : [],
+      bullishReasons: adaptive.bullishReasons,
+      bearishReasons: adaptive.bearishReasons,
+      trigger: adaptive.trigger,
+      margin: adaptive.margin,
+      spread: adaptive.spread,
       tradeLevels: levels,
       autoTrade: HF_AUTO_TRADE,
-      executionAllowed: HF_AUTO_TRADE && (direction === "BUY" || direction === "SELL"),
+      executionAllowed: HF_AUTO_TRADE && adaptive.executionAllowed,
+      engine: "XAU_AI_ADAPTIVE_MOMENTUM_V2",
       mtf: mtf.MTF || null,
       structure: mtf.MTF_STRUCTURE || null,
       confirmation: mtf.MTF_CONFIRMATION || null,
@@ -5082,7 +5261,6 @@ async function buildHFDecision(bid, ask) {
     HF_STATE.decisionRunning = false;
   }
 }
-
 app.get("/hf/status", (req, res) => {
   if (!hfAuthorized(req)) return res.status(401).json({success:false,error:"Unauthorized"});
   res.json({
