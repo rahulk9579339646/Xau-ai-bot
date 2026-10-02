@@ -2969,7 +2969,7 @@ function buildIndependentTrendlineTradeSignal(direction, timeframe, analysis, tr
   if (trend.retest?.occurred && trend.retest?.held) { score+=1; reasons.push(`${label} breakout retest held`); }
   else if (trend.continuation) reasons.push(`${label} continuation confirmed`);
 
-  return { ready: trend.confirmed && trend.strength!=="Weak" && structureAligned && momentumAligned && score>=7, direction, timeframe, score, maxScore:11, structureAligned, momentumAligned, candleAligned, reasons, warnings };
+  return { ready: trend.confirmed && trend.strength!=="Weak" && score>=8, direction, timeframe, score, maxScore:11, structureAligned, momentumAligned, candleAligned, reasons, warnings };
 }
 
 function build5MTrendlineTradeSignal(direction, a5, t5) {
@@ -5034,106 +5034,6 @@ setTimeout(monitorTrendlineSignal, 15000);
 setInterval(monitorTrendlineSignal, 60 * 1000);
 
 /* =========================================================
-   SPECIAL TRENDLINE SIGNAL API
-   Dedicated endpoint for Liquid Chart special Trendline trading.
-   Uses the existing independent timeframe Trendline engine.
-========================================================= */
-app.get("/special-trendline-signal", async (req, res) => {
-  try {
-    const [candles1H, candles15M, candles5M] = await Promise.all([
-      getCandles(TF["1H"], 350),
-      getCandles(TF["15M"], 350),
-      getCandles(TF["5M"], 350)
-    ]);
-
-    const result = trendlineAnalysis(candles1H, candles15M, candles5M);
-    const timeframes = ["1H", "15M", "5M"];
-    const candidates = [];
-
-    for (const tf of timeframes) {
-      const item = result?.INDEPENDENT_TRADE_SIGNALS?.[tf] || {};
-      const signal = item.signal || {};
-      const levels = item.levels || {};
-
-      if (
-        signal.ready === true &&
-        (signal.direction === "BUY" || signal.direction === "SELL") &&
-        Number.isFinite(Number(levels.entry)) &&
-        Number.isFinite(Number(levels.stopLoss)) &&
-        Number.isFinite(Number(levels.takeProfit?.TP1))
-      ) {
-        candidates.push({ timeframe: tf, signal, levels });
-      }
-    }
-
-    candidates.sort((a, b) => Number(b.signal.score || 0) - Number(a.signal.score || 0));
-    const selected = candidates[0] || null;
-
-    let telegram = { sent: false, reason: "No new special Trendline signal" };
-
-    if (selected) {
-      const key = trendlineAlertKey(result, selected.timeframe);
-      const stateKey = `XAUUSD:${selected.timeframe}`;
-      if (key && TRENDLINE_ALERT_STATE.get(stateKey) !== key) {
-        telegram = await sendTelegramMessage(
-          buildTrendlineTelegramMessage({
-            ...result,
-            TRENDLINE_SIGNAL: {
-              ...selected.signal,
-              signalTimeframe: selected.timeframe,
-              status: selected.signal.score >= 9 ? "SPECIAL STRONG CONFIRMED" : "SPECIAL CONFIRMED"
-            },
-            TRADE_LEVELS: selected.levels
-          })
-        );
-        if (telegram?.sent) TRENDLINE_ALERT_STATE.set(stateKey, key);
-      } else {
-        telegram = { sent: false, reason: "Duplicate special Trendline signal suppressed", alertKey: key };
-      }
-    }
-
-    res.json({
-      success: true,
-      instrument: OUTPUT_SYMBOL,
-      generatedAt: new Date().toISOString(),
-      mode: "SPECIAL_TRENDLINE_TRADE",
-      currentPrice: result.currentPrice ?? null,
-      executable: !!selected,
-      SPECIAL_TRENDLINE_SIGNAL: selected
-        ? {
-            status: selected.signal.score >= 9 ? "SPECIAL STRONG CONFIRMED" : "SPECIAL CONFIRMED",
-            direction: selected.signal.direction,
-            score: selected.signal.score ?? 0,
-            maxScore: 11,
-            confirmationGrade: selected.signal.score >= 9 ? "STRONG" : "CONFIRMED",
-            signalTimeframe: selected.timeframe,
-            reasons: selected.signal.reasons || [],
-            warnings: selected.signal.warnings || []
-          }
-        : {
-            status: "WAITING",
-            direction: "None",
-            score: 0,
-            maxScore: 11,
-            confirmationGrade: "NONE",
-            signalTimeframe: "None",
-            reasons: ["No confirmed independent Trendline trade setup"],
-            warnings: []
-          },
-      TRADE_LEVELS: selected ? selected.levels : null,
-      TELEGRAM: telegram,
-      TIMEFRAME_STATES: result?.TRENDLINE_SIGNAL?.timeframeStatuses || null
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      mode: "SPECIAL_TRENDLINE_TRADE"
-    });
-  }
-});
-
-/* =========================================================
    ROOT
 ========================================================= */
 
@@ -5897,6 +5797,85 @@ app.get("/hf/decision", async (req, res) => {
 
   const decision = await buildHFDecision(bid, ask);
   res.json(decision);
+});
+
+/* =========================================================
+   SPECIAL TRENDLINE TRADE ENDPOINT
+   Score >= 8/11 + valid direction + valid trade levels = executable.
+   The underlying trendline confirmation rules remain active; readiness
+   is relaxed from structure+momentum to the explicit 8/11 threshold.
+========================================================= */
+app.get("/special-trendline-signal", async (req, res) => {
+  try {
+    const [candles1H, candles15M, candles5M] = await Promise.all([
+      getCandles(TF["1H"], 350),
+      getCandles(TF["15M"], 350),
+      getCandles(TF["5M"], 350)
+    ]);
+
+    const result = trendlineAnalysis(candles1H, candles15M, candles5M);
+    const timeframes = ["1H", "15M", "5M"];
+    const candidates = [];
+
+    for (const tf of timeframes) {
+      const state = result?.TRENDLINE_SIGNAL?.timeframeStatuses?.[tf] || {};
+      const signals = result?.TRENDLINE_SCORE?.BUY?.independentTimeframeSignals?.[tf] || {};
+      for (const direction of ["BUY", "SELL"]) {
+        const signal = signals?.[direction];
+        if (signal?.ready === true && (signal.direction === "BUY" || signal.direction === "SELL")) {
+          const levels = buildTrendlineTradeLevels(
+            signal.direction,
+            result.analysis["1H"],
+            result.analysis["15M"],
+            result.analysis["5M"],
+            result.TRENDLINES[tf],
+            tf
+          );
+          if (levels && Number.isFinite(Number(levels.entry)) && Number.isFinite(Number(levels.stopLoss)) && Number.isFinite(Number(levels.takeProfit?.TP1))) {
+            candidates.push({ timeframe: tf, signal: { ...signal, state }, levels });
+          }
+        }
+      }
+    }
+
+    candidates.sort((a, b) => Number(b.signal.score || 0) - Number(a.signal.score || 0));
+    const selected = candidates[0] || null;
+    const states = result?.TRENDLINE_SIGNAL?.timeframeStatuses || {};
+
+    res.json({
+      success: true,
+      instrument: OUTPUT_SYMBOL,
+      generatedAt: new Date().toISOString(),
+      mode: "SPECIAL_TRENDLINE_TRADE_SCORE_8",
+      currentPrice: result.currentPrice ?? null,
+      executable: !!selected,
+      SPECIAL_TRENDLINE_SIGNAL: selected
+        ? {
+            status: selected.signal.score >= 9 ? "SPECIAL STRONG CONFIRMED" : "SPECIAL CONFIRMED",
+            direction: selected.signal.direction,
+            score: selected.signal.score,
+            maxScore: 11,
+            confirmationGrade: selected.signal.score >= 9 ? "STRONG" : "CONFIRMED",
+            signalTimeframe: selected.timeframe,
+            reasons: selected.signal.reasons || [],
+            warnings: selected.signal.warnings || []
+          }
+        : {
+            status: "WAITING",
+            direction: "None",
+            score: Math.max(...timeframes.map(tf => Number(states?.[tf]?.score || 0))),
+            maxScore: 11,
+            confirmationGrade: "WATCH",
+            signalTimeframe: "None",
+            reasons: ["No 8/11 executable independent Trendline setup"],
+            warnings: []
+          },
+      TRADE_LEVELS: selected ? selected.levels : null,
+      TIMEFRAME_STATES: states
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message, mode: "SPECIAL_TRENDLINE_TRADE_SCORE_8" });
+  }
 });
 
 /* =========================================================
