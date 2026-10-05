@@ -5901,124 +5901,278 @@ let strategy78LastScanAt = null;
 let strategy78LastError = null;
 
 function build78StrategyDecision(result) {
-  const analyses = result?.analysis || {};
-  const states = result?.TRENDLINE_SIGNAL?.timeframeStatuses || {};
-  const currentPrice = num(result?.currentPrice);
+  /*
+     78.31% RECOVERED STRATEGY
+     -------------------------
+     Execution: 5M
+     Context:   1H + 15M
+     Setup:     Trendline breakout + strong displacement
+                + MTF confirmation + 5M retest/continuation
 
+     IMPORTANT:
+     The 1H/15M values below are CONTEXT.  A 1H/15M trendline
+     breakout is NOT required for a 5M trade.  The 5M breakout is
+     the actual trigger, matching the recovered execution model.
+  */
+
+  const analyses = result?.analysis || {};
+  const currentPrice = num(result?.currentPrice);
   const a1 = analyses["1H"] || {};
   const a15 = analyses["15M"] || {};
   const a5 = analyses["5M"] || {};
+  const tl5 = result?.TRENDLINES?.["5M"] || {};
+  const tl1 = result?.TRENDLINES?.["1H"] || {};
+  const tl15 = result?.TRENDLINES?.["15M"] || {};
 
-  const buy5 = result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.signal;
-  const sell5 = result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.signal;
-  const level5 = result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.levels;
+  function trendMatches(analysis, direction) {
+    const text = String(analysis?.trend || "");
+    return direction === "BUY"
+      ? /Bullish/i.test(text)
+      : /Bearish/i.test(text);
+  }
+
+  function structureMatches(analysis, direction) {
+    const structure = String(analysis?.structure?.structure || "");
+    const br = String(analysis?.breakDirection || "");
+    const bos = String(analysis?.break?.BOS || "");
+    return direction === "BUY"
+      ? structure === "Bullish Structure" || br === "Bullish" || /Bullish BOS|Bullish CHoCH|Bullish MSS/i.test(bos)
+      : structure === "Bearish Structure" || br === "Bearish" || /Bearish BOS|Bearish CHoCH|Bearish MSS/i.test(bos);
+  }
+
+  function momentumMatches(analysis, direction) {
+    const rsi = Number(analysis?.indicators?.RSI14);
+    const macd = analysis?.indicators?.MACD?.bias;
+    return direction === "BUY"
+      ? rsi > 50 && macd === "Bullish"
+      : rsi < 50 && macd === "Bearish";
+  }
+
+  function candleMatches(analysis, direction) {
+    return direction === "BUY"
+      ? analysis?.candle?.direction === "Bullish"
+      : analysis?.candle?.direction === "Bearish";
+  }
+
+  function getLevels(direction, trend5) {
+    if (!trend5?.confirmed || trend5.strength === "Weak") return null;
+    return buildTrendlineTradeLevels(
+      direction,
+      a1,
+      a15,
+      a5,
+      tl5,
+      "5M"
+    );
+  }
 
   const candidates = [];
 
   for (const direction of ["BUY", "SELL"]) {
-    const signal = direction === "BUY"
-      ? result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.signal?.direction === "BUY"
-        ? result.INDEPENDENT_TRADE_SIGNALS["5M"].signal : null
-      : result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.signal?.direction === "SELL"
-        ? result.INDEPENDENT_TRADE_SIGNALS["5M"].signal : null;
+    const trend5 = direction === "BUY" ? tl5.bullish : tl5.bearish;
+    const opposite5 = direction === "BUY" ? tl5.bearish : tl5.bullish;
 
-    const levels = direction === "BUY"
-      ? (result?.TRENDLINES?.["5M"]?.bullish?.confirmed ? result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.levels : null)
-      : (result?.TRENDLINES?.["5M"]?.bearish?.confirmed ? result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.levels : null);
-
-    const trend5 = direction === "BUY"
-      ? result?.TRENDLINES?.["5M"]?.bullish
-      : result?.TRENDLINES?.["5M"]?.bearish;
-
-    if (!signal || signal.direction !== direction || !signal.ready || !levels || !trend5?.confirmed) continue;
-
-    const bullish = direction === "BUY";
-    const htfStructure = bullish
-      ? a1.structure?.structure === "Bullish Structure"
-      : a1.structure?.structure === "Bearish Structure";
-    const mtf15Structure = bullish
-      ? a15.structure?.structure === "Bullish Structure"
-      : a15.structure?.structure === "Bearish Structure";
-    const htfTrend = bullish
-      ? String(a1.trend || "").includes("Bullish")
-      : String(a1.trend || "").includes("Bearish");
-    const mtf15Trend = bullish
-      ? String(a15.trend || "").includes("Bullish")
-      : String(a15.trend || "").includes("Bearish");
-    const fiveMomentum = bullish
-      ? Number(a5.indicators?.RSI14) > 50 && a5.indicators?.MACD?.bias === "Bullish"
-      : Number(a5.indicators?.RSI14) < 50 && a5.indicators?.MACD?.bias === "Bearish";
-    const fiveCandle = bullish
-      ? a5.candle?.direction === "Bullish"
-      : a5.candle?.direction === "Bearish";
-
-    const retestHeld = !!trend5.retest?.occurred && !!trend5.retest?.held;
-    const continuation = !!trend5.continuation;
+    const breakout = !!trend5?.confirmed && trend5?.strength !== "Weak";
+    const strongBreakout = trend5?.strength === "Strong";
+    const htfTrend = trendMatches(a1, direction);
+    const htfStructure = structureMatches(a1, direction);
+    const mtf15Trend = trendMatches(a15, direction);
+    const mtf15Structure = structureMatches(a15, direction);
+    const fiveStructure = structureMatches(a5, direction);
+    const fiveMomentum = momentumMatches(a5, direction);
+    const fiveCandle = candleMatches(a5, direction);
+    const retestHeld = !!trend5?.retest?.occurred && !!trend5?.retest?.held;
+    const continuation = !!trend5?.continuation;
     const retestOrContinuation = retestHeld || continuation;
+    const oppositeStrong = !!opposite5?.confirmed && opposite5?.strength === "Strong";
 
-    const opposite5 = bullish
-      ? result?.TRENDLINES?.["5M"]?.bearish
-      : result?.TRENDLINES?.["5M"]?.bullish;
-    const oppositeConfirmed = !!opposite5?.confirmed && opposite5?.strength === "Strong";
-
+    let score = 0;
     const confirmations = [];
     const warnings = [];
-    let score = 0;
 
-    if (trend5.confirmed && trend5.strength !== "Weak") { score += 3; confirmations.push("5M trendline breakout"); }
-    if (trend5.strength === "Strong") { score += 1; confirmations.push("5M strong breakout displacement"); }
-    if (htfTrend) { score += 1; confirmations.push(`1H ${direction} trend alignment`); }
-    if (htfStructure) { score += 1; confirmations.push(`1H ${direction} structure confirmation`); }
-    if (mtf15Trend) { score += 1; confirmations.push(`15M ${direction} trend alignment`); }
-    if (mtf15Structure) { score += 1; confirmations.push(`15M ${direction} structure confirmation`); }
-    if (fiveMomentum) { score += 1; confirmations.push(`5M ${direction} momentum`); }
-    if (fiveCandle) { score += 1; confirmations.push(`5M ${direction} candle confirmation`); }
-    if (retestHeld) { score += 1; confirmations.push("5M breakout retest held"); }
-    else if (continuation) { score += 1; confirmations.push("5M continuation confirmed"); }
+    if (breakout) {
+      score += 3;
+      confirmations.push("5M trendline breakout confirmed");
+    } else {
+      warnings.push("5M trendline breakout not confirmed");
+    }
 
-    if (!htfTrend || !htfStructure) warnings.push("1H context is not fully aligned");
-    if (!mtf15Trend || !mtf15Structure) warnings.push("15M context is not fully aligned");
-    if (!fiveMomentum) warnings.push("5M momentum is not fully aligned");
-    if (!retestOrContinuation) warnings.push("No confirmed retest-held or continuation path");
-    if (oppositeConfirmed) warnings.push("Strong opposite 5M trendline is present");
+    if (strongBreakout) {
+      score += 1;
+      confirmations.push("5M strong breakout displacement");
+    } else if (breakout) {
+      warnings.push("5M breakout is not Strong");
+    }
 
-    // 78% baseline gate: all three layers must agree and the
-    // 5M setup must have a retest/continuation path.
-    const ready = !!(
-      signal.ready &&
-      htfTrend &&
-      mtf15Trend &&
-      htfStructure &&
-      mtf15Structure &&
-      retestOrContinuation &&
-      !oppositeConfirmed &&
+    if (htfTrend) {
+      score += 1;
+      confirmations.push(`1H ${direction} trend alignment`);
+    } else {
+      warnings.push("1H trend is not aligned");
+    }
+
+    if (htfStructure) {
+      score += 1;
+      confirmations.push(`1H ${direction} structure confirmation`);
+    } else {
+      warnings.push("1H structure is not aligned");
+    }
+
+    if (mtf15Trend) {
+      score += 1;
+      confirmations.push(`15M ${direction} trend alignment`);
+    } else {
+      warnings.push("15M trend is not aligned");
+    }
+
+    if (mtf15Structure) {
+      score += 1;
+      confirmations.push(`15M ${direction} structure confirmation`);
+    } else {
+      warnings.push("15M structure is not aligned");
+    }
+
+    if (fiveStructure) {
+      score += 1;
+      confirmations.push(`5M ${direction} structure confirmation`);
+    } else {
+      warnings.push("5M entry structure is not aligned");
+    }
+
+    if (fiveMomentum) {
+      score += 1;
+      confirmations.push(`5M ${direction} momentum confirmation`);
+    } else {
+      warnings.push("5M RSI/MACD momentum is not aligned");
+    }
+
+    if (fiveCandle) {
+      score += 1;
+      confirmations.push(`5M ${direction} candle confirmation`);
+    }
+
+    if (retestHeld) {
+      score += 1;
+      confirmations.push("5M breakout retest held");
+    } else if (continuation) {
+      score += 1;
+      confirmations.push("5M continuation confirmed");
+    } else {
+      warnings.push("No 5M retest-held or continuation path");
+    }
+
+    if (oppositeStrong) {
+      warnings.push("Strong opposite 5M trendline is present");
+    }
+
+    /*
+       Execution gate for the recovered setup:
+       1) 5M breakout + strong displacement
+       2) 1H context aligned
+       3) 15M context aligned
+       4) 5M structure + momentum
+       5) retest held OR continuation
+       6) no strong opposite 5M breakout
+       7) valid 5M trade levels
+    */
+    const levels = getLevels(direction, trend5);
+    const validLevels = !!(
+      levels &&
       Number.isFinite(Number(levels.entry)) &&
       Number.isFinite(Number(levels.stopLoss)) &&
       Number.isFinite(Number(levels.takeProfit?.TP1))
     );
 
+    const ready = !!(
+      breakout &&
+      strongBreakout &&
+      htfTrend &&
+      htfStructure &&
+      mtf15Trend &&
+      mtf15Structure &&
+      fiveStructure &&
+      fiveMomentum &&
+      retestOrContinuation &&
+      !oppositeStrong &&
+      validLevels
+    );
+
     candidates.push({
       direction,
-      ready,
       score,
       maxScore: 12,
-      entry: levels.entry,
-      stopLoss: levels.stopLoss,
-      takeProfit: levels.takeProfit,
-      trendline: trend5,
+      ready,
+      entry: levels?.entry ?? null,
+      stopLoss: levels?.stopLoss ?? null,
+      takeProfit: levels?.takeProfit ?? null,
+      trendline: trend5 || null,
       confirmations,
       warnings,
       context: {
-        "1H": { trend: a1.trend || null, structure: a1.structure?.structure || null },
-        "15M": { trend: a15.trend || null, structure: a15.structure?.structure || null },
-        "5M": { trend: a5.trend || null, structure: a5.structure?.structure || null }
+        "1H": {
+          trend: a1.trend || null,
+          structure: a1.structure?.structure || null
+        },
+        "15M": {
+          trend: a15.trend || null,
+          structure: a15.structure?.structure || null
+        },
+        "5M": {
+          trend: a5.trend || null,
+          structure: a5.structure?.structure || null
+        }
+      },
+      components: {
+        breakout,
+        strongBreakout,
+        htfTrend,
+        htfStructure,
+        mtf15Trend,
+        mtf15Structure,
+        fiveStructure,
+        fiveMomentum,
+        fiveCandle,
+        retestHeld,
+        continuation,
+        retestOrContinuation,
+        oppositeStrong,
+        validLevels
       }
     });
   }
 
-  candidates.sort((a, b) => Number(b.score) - Number(a.score));
+  candidates.sort((a, b) => {
+    if (Number(b.ready) !== Number(a.ready)) return Number(b.ready) - Number(a.ready);
+    return Number(b.score) - Number(a.score);
+  });
+
   const selected = candidates.find(x => x.ready) || null;
   const best = candidates[0] || null;
+
+  const timeframeStates = {
+    "1H": {
+      status: "CONTEXT",
+      direction: trendMatches(a1, "BUY") ? "BUY" : trendMatches(a1, "SELL") ? "SELL" : "None",
+      trend: a1.trend || null,
+      structure: a1.structure?.structure || null
+    },
+    "15M": {
+      status: "CONTEXT",
+      direction: trendMatches(a15, "BUY") ? "BUY" : trendMatches(a15, "SELL") ? "SELL" : "None",
+      trend: a15.trend || null,
+      structure: a15.structure?.structure || null
+    },
+    "5M": {
+      status: best?.ready ? "CONFIRMED" : best?.score >= 7 ? "WATCHING" : "WAITING",
+      direction: best?.direction || "None",
+      score: best?.score || 0,
+      maxScore: 12,
+      trend: a5.trend || null,
+      structure: a5.structure?.structure || null,
+      retestHeld: !!best?.components?.retestHeld,
+      continuation: !!best?.components?.continuation
+    }
+  };
 
   return {
     success: true,
@@ -6028,7 +6182,7 @@ function build78StrategyDecision(result) {
     contextTimeframes: ["1H", "15M"],
     generatedAt: new Date().toISOString(),
     currentPrice,
-    status: selected ? "CONFIRMED" : (best && best.score >= 7 ? "WATCHING" : "WAITING"),
+    status: selected ? "CONFIRMED" : (best?.score >= 7 ? "WATCHING" : "WAITING"),
     executable: !!selected,
     signal: selected
       ? {
@@ -6040,25 +6194,30 @@ function build78StrategyDecision(result) {
           warnings: selected.warnings
         }
       : {
-          direction: null,
+          direction: best?.direction || null,
           score: best?.score || 0,
           maxScore: 12,
-          status: best && best.score >= 7 ? "WATCHING" : "WAITING",
+          status: best?.score >= 7 ? "WATCHING" : "WAITING",
           confirmations: best?.confirmations || [],
           warnings: best?.warnings || []
         },
     tradeLevels: selected
-      ? { entry: selected.entry, stopLoss: selected.stopLoss, takeProfit: selected.takeProfit }
+      ? {
+          entry: selected.entry,
+          stopLoss: selected.stopLoss,
+          takeProfit: selected.takeProfit
+        }
       : null,
-    context: selected?.context || best?.context || {
+    context: best?.context || {
       "1H": { trend: a1.trend || null, structure: a1.structure?.structure || null },
       "15M": { trend: a15.trend || null, structure: a15.structure?.structure || null },
       "5M": { trend: a5.trend || null, structure: a5.structure?.structure || null }
     },
-    retest: selected?.trendline?.retest || best?.trendline?.retest || null,
-    continuation: !!(selected?.trendline?.continuation || best?.trendline?.continuation),
-    timeframeStates: states,
-    note: "Historical backtest result: 355 trades, 278 wins, 77 losses, 78.31% win rate. Live performance is not guaranteed."
+    retest: best?.trendline?.retest || null,
+    continuation: !!best?.trendline?.continuation,
+    timeframeStates,
+    strategyComponents: best?.components || null,
+    note: "Historical backtest result: 355 trades, 278 wins, 77 losses, 78.31% win rate. This live implementation uses the recovered 5M execution + 1H/15M context model; live performance is not guaranteed."
   };
 }
 
