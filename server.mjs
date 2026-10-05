@@ -5070,7 +5070,9 @@ app.get(
         "/trendline-monitor-status",
         "/hf/status",
         "/hf/decision",
-        "/hf/tick"
+        "/hf/tick",
+        "/strategy78/decision",
+        "/strategy78/status"
       ],
       trendlineMonitor: {
         intervalSeconds: 60,
@@ -5877,6 +5879,291 @@ app.get("/special-trendline-signal", async (req, res) => {
     res.status(500).json({ success: false, error: error.message, mode: "SPECIAL_TRENDLINE_TRADE_SCORE_8" });
   }
 });
+
+
+/* =========================================================
+   78.31% RECOVERED STRATEGY — LIVE SIGNAL LAYER
+   Execution timeframe: 5M
+   Context: 1H + 15M
+   Core setup: Trendline Breakout + MTF Confirmation
+                + Retest / Continuation
+
+   IMPORTANT:
+   This layer reuses the existing market-data/API stack above.
+   It does not create a second data provider or require a new API key.
+   The historical 78.31% result is a backtest result, not a guarantee
+   of future live performance.
+========================================================= */
+
+let strategy78LastSignalKey = null;
+let strategy78LastTelegramResult = null;
+let strategy78LastScanAt = null;
+let strategy78LastError = null;
+
+function build78StrategyDecision(result) {
+  const analyses = result?.analysis || {};
+  const states = result?.TRENDLINE_SIGNAL?.timeframeStatuses || {};
+  const currentPrice = num(result?.currentPrice);
+
+  const a1 = analyses["1H"] || {};
+  const a15 = analyses["15M"] || {};
+  const a5 = analyses["5M"] || {};
+
+  const buy5 = result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.signal;
+  const sell5 = result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.signal;
+  const level5 = result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.levels;
+
+  const candidates = [];
+
+  for (const direction of ["BUY", "SELL"]) {
+    const signal = direction === "BUY"
+      ? result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.signal?.direction === "BUY"
+        ? result.INDEPENDENT_TRADE_SIGNALS["5M"].signal : null
+      : result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.signal?.direction === "SELL"
+        ? result.INDEPENDENT_TRADE_SIGNALS["5M"].signal : null;
+
+    const levels = direction === "BUY"
+      ? (result?.TRENDLINES?.["5M"]?.bullish?.confirmed ? result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.levels : null)
+      : (result?.TRENDLINES?.["5M"]?.bearish?.confirmed ? result?.INDEPENDENT_TRADE_SIGNALS?.["5M"]?.levels : null);
+
+    const trend5 = direction === "BUY"
+      ? result?.TRENDLINES?.["5M"]?.bullish
+      : result?.TRENDLINES?.["5M"]?.bearish;
+
+    if (!signal || signal.direction !== direction || !signal.ready || !levels || !trend5?.confirmed) continue;
+
+    const bullish = direction === "BUY";
+    const htfStructure = bullish
+      ? a1.structure?.structure === "Bullish Structure"
+      : a1.structure?.structure === "Bearish Structure";
+    const mtf15Structure = bullish
+      ? a15.structure?.structure === "Bullish Structure"
+      : a15.structure?.structure === "Bearish Structure";
+    const htfTrend = bullish
+      ? String(a1.trend || "").includes("Bullish")
+      : String(a1.trend || "").includes("Bearish");
+    const mtf15Trend = bullish
+      ? String(a15.trend || "").includes("Bullish")
+      : String(a15.trend || "").includes("Bearish");
+    const fiveMomentum = bullish
+      ? Number(a5.indicators?.RSI14) > 50 && a5.indicators?.MACD?.bias === "Bullish"
+      : Number(a5.indicators?.RSI14) < 50 && a5.indicators?.MACD?.bias === "Bearish";
+    const fiveCandle = bullish
+      ? a5.candle?.direction === "Bullish"
+      : a5.candle?.direction === "Bearish";
+
+    const retestHeld = !!trend5.retest?.occurred && !!trend5.retest?.held;
+    const continuation = !!trend5.continuation;
+    const retestOrContinuation = retestHeld || continuation;
+
+    const opposite5 = bullish
+      ? result?.TRENDLINES?.["5M"]?.bearish
+      : result?.TRENDLINES?.["5M"]?.bullish;
+    const oppositeConfirmed = !!opposite5?.confirmed && opposite5?.strength === "Strong";
+
+    const confirmations = [];
+    const warnings = [];
+    let score = 0;
+
+    if (trend5.confirmed && trend5.strength !== "Weak") { score += 3; confirmations.push("5M trendline breakout"); }
+    if (trend5.strength === "Strong") { score += 1; confirmations.push("5M strong breakout displacement"); }
+    if (htfTrend) { score += 1; confirmations.push(`1H ${direction} trend alignment`); }
+    if (htfStructure) { score += 1; confirmations.push(`1H ${direction} structure confirmation`); }
+    if (mtf15Trend) { score += 1; confirmations.push(`15M ${direction} trend alignment`); }
+    if (mtf15Structure) { score += 1; confirmations.push(`15M ${direction} structure confirmation`); }
+    if (fiveMomentum) { score += 1; confirmations.push(`5M ${direction} momentum`); }
+    if (fiveCandle) { score += 1; confirmations.push(`5M ${direction} candle confirmation`); }
+    if (retestHeld) { score += 1; confirmations.push("5M breakout retest held"); }
+    else if (continuation) { score += 1; confirmations.push("5M continuation confirmed"); }
+
+    if (!htfTrend || !htfStructure) warnings.push("1H context is not fully aligned");
+    if (!mtf15Trend || !mtf15Structure) warnings.push("15M context is not fully aligned");
+    if (!fiveMomentum) warnings.push("5M momentum is not fully aligned");
+    if (!retestOrContinuation) warnings.push("No confirmed retest-held or continuation path");
+    if (oppositeConfirmed) warnings.push("Strong opposite 5M trendline is present");
+
+    // 78% baseline gate: all three layers must agree and the
+    // 5M setup must have a retest/continuation path.
+    const ready = !!(
+      signal.ready &&
+      htfTrend &&
+      mtf15Trend &&
+      htfStructure &&
+      mtf15Structure &&
+      retestOrContinuation &&
+      !oppositeConfirmed &&
+      Number.isFinite(Number(levels.entry)) &&
+      Number.isFinite(Number(levels.stopLoss)) &&
+      Number.isFinite(Number(levels.takeProfit?.TP1))
+    );
+
+    candidates.push({
+      direction,
+      ready,
+      score,
+      maxScore: 12,
+      entry: levels.entry,
+      stopLoss: levels.stopLoss,
+      takeProfit: levels.takeProfit,
+      trendline: trend5,
+      confirmations,
+      warnings,
+      context: {
+        "1H": { trend: a1.trend || null, structure: a1.structure?.structure || null },
+        "15M": { trend: a15.trend || null, structure: a15.structure?.structure || null },
+        "5M": { trend: a5.trend || null, structure: a5.structure?.structure || null }
+      }
+    });
+  }
+
+  candidates.sort((a, b) => Number(b.score) - Number(a.score));
+  const selected = candidates.find(x => x.ready) || null;
+  const best = candidates[0] || null;
+
+  return {
+    success: true,
+    instrument: OUTPUT_SYMBOL,
+    strategy: "XAUUSD 78.31% Strategy",
+    executionTimeframe: "5M",
+    contextTimeframes: ["1H", "15M"],
+    generatedAt: new Date().toISOString(),
+    currentPrice,
+    status: selected ? "CONFIRMED" : (best && best.score >= 7 ? "WATCHING" : "WAITING"),
+    executable: !!selected,
+    signal: selected
+      ? {
+          direction: selected.direction,
+          score: selected.score,
+          maxScore: selected.maxScore,
+          status: "78.31% STRATEGY CONFIRMED",
+          confirmations: selected.confirmations,
+          warnings: selected.warnings
+        }
+      : {
+          direction: null,
+          score: best?.score || 0,
+          maxScore: 12,
+          status: best && best.score >= 7 ? "WATCHING" : "WAITING",
+          confirmations: best?.confirmations || [],
+          warnings: best?.warnings || []
+        },
+    tradeLevels: selected
+      ? { entry: selected.entry, stopLoss: selected.stopLoss, takeProfit: selected.takeProfit }
+      : null,
+    context: selected?.context || best?.context || {
+      "1H": { trend: a1.trend || null, structure: a1.structure?.structure || null },
+      "15M": { trend: a15.trend || null, structure: a15.structure?.structure || null },
+      "5M": { trend: a5.trend || null, structure: a5.structure?.structure || null }
+    },
+    retest: selected?.trendline?.retest || best?.trendline?.retest || null,
+    continuation: !!(selected?.trendline?.continuation || best?.trendline?.continuation),
+    timeframeStates: states,
+    note: "Historical backtest result: 355 trades, 278 wins, 77 losses, 78.31% win rate. Live performance is not guaranteed."
+  };
+}
+
+function build78TelegramMessage(decision) {
+  const s = decision.signal || {};
+  const l = decision.tradeLevels || {};
+  const c = decision.context || {};
+
+  return [
+    "━━━━━━━━━━━━━━━━━━━━",
+    "🚨 XAUUSD 78.31% STRATEGY TRADE SIGNAL",
+    "━━━━━━━━━━━━━━━━━━━━",
+    `Direction: ${s.direction || "WAIT"}`,
+    `Status: ${s.status || "WAITING"}`,
+    `Score: ${s.score ?? 0}/${s.maxScore ?? 12}`,
+    `Price: ${decision.currentPrice ?? "N/A"}`,
+    "",
+    "MTF CONFIRMATION",
+    `1H: ${c["1H"]?.trend || "N/A"} | ${c["1H"]?.structure || "N/A"}`,
+    `15M: ${c["15M"]?.trend || "N/A"} | ${c["15M"]?.structure || "N/A"}`,
+    `5M: ${c["5M"]?.trend || "N/A"} | ${c["5M"]?.structure || "N/A"}`,
+    "",
+    "TRADE LEVELS",
+    `Entry: ${l.entry ?? "N/A"}`,
+    `SL: ${l.stopLoss ?? "N/A"}`,
+    `TP1: ${l.takeProfit?.TP1 ?? "N/A"}`,
+    `TP2: ${l.takeProfit?.TP2 ?? "N/A"}`,
+    `TP3: ${l.takeProfit?.TP3 ?? "N/A"}`,
+    "",
+    "CONFIRMATIONS",
+    ...(s.confirmations || []).slice(0, 12).map(x => `• ${x}`),
+    ...(s.warnings?.length ? ["", "WARNINGS", ...s.warnings.slice(0, 6).map(x => `• ${x}`)] : []),
+    "",
+    "Strategy: Trendline Breakout + MTF Confirmation + Retest/Continuation",
+    "Execution: 5M | Context: 1H + 15M",
+    "━━━━━━━━━━━━━━━━━━━━"
+  ].join("\n");
+}
+
+async function scan78StrategyAndAlert() {
+  try {
+    strategy78LastScanAt = new Date().toISOString();
+    const result = await trendlineAnalysis(
+      await getCandles(TF["1H"], 350),
+      await getCandles(TF["15M"], 350),
+      await getCandles(TF["5M"], 350)
+    );
+    const decision = build78StrategyDecision(result);
+    strategy78LastError = null;
+
+    if (!decision.executable) return decision;
+
+    const key = [
+      decision.signal.direction,
+      decision.tradeLevels?.entry,
+      result?.TRENDLINES?.["5M"]?.[decision.signal.direction === "BUY" ? "bullish" : "bearish"]?.breakoutIndex,
+      result?.TRENDLINES?.["5M"]?.[decision.signal.direction === "BUY" ? "bullish" : "bearish"]?.breakoutPrice
+    ].join(":");
+
+    if (key !== strategy78LastSignalKey) {
+      const telegram = await sendTelegramMessage(build78TelegramMessage(decision));
+      strategy78LastTelegramResult = {
+        ...telegram,
+        attemptedAt: new Date().toISOString(),
+        signalKey: key
+      };
+      if (telegram?.sent) {
+        strategy78LastSignalKey = key;
+        console.log("78.31% strategy Telegram signal sent:", key);
+      } else {
+        console.log("78.31% strategy Telegram signal failed:", telegram);
+      }
+    }
+
+    return decision;
+  } catch (error) {
+    strategy78LastError = error.message;
+    console.log("78.31% strategy scan error:", error.message);
+    return { success: false, strategy: "XAUUSD 78.31% Strategy", status: "ERROR", error: error.message };
+  }
+}
+
+app.get("/strategy78/decision", async (req, res) => {
+  const result = await scan78StrategyAndAlert();
+  res.status(result?.success === false ? 500 : 200).json(result);
+});
+
+app.get("/strategy78/status", (req, res) => {
+  res.json({
+    success: true,
+    strategy: "XAUUSD 78.31% Strategy",
+    instrument: OUTPUT_SYMBOL,
+    executionTimeframe: "5M",
+    context: ["1H", "15M"],
+    lastScanAt: strategy78LastScanAt,
+    lastSignalKey: strategy78LastSignalKey,
+    lastTelegram: strategy78LastTelegramResult,
+    lastError: strategy78LastError
+  });
+});
+
+// Independent 60-second scanner. It sends Telegram ONLY when a new
+// confirmed 78.31% setup appears; WAITING/WATCHING states do not alert.
+setTimeout(scan78StrategyAndAlert, 20000);
+setInterval(scan78StrategyAndAlert, 60 * 1000);
 
 /* =========================================================
    SERVER
