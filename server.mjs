@@ -401,7 +401,7 @@ function buildTelegramMessage(mtf) {
       `\nBullish Reasons:\n` +
       entry.bullishReasons
         .slice(0, 8)
-        .map(x => `â€¢ ${x}`)
+        .map(x => `• ${x}`)
         .join("\n") +
       "\n";
   }
@@ -413,7 +413,7 @@ function buildTelegramMessage(mtf) {
       `\nBearish Reasons:\n` +
       entry.bearishReasons
         .slice(0, 8)
-        .map(x => `â€¢ ${x}`)
+        .map(x => `• ${x}`)
         .join("\n") +
       "\n";
   }
@@ -4339,7 +4339,7 @@ function buildHourlyTelegramMessage(
   } else {
     message +=
       `\nTRADE LEVELS\n` +
-      `No confirmed trade levels â€” engine is still waiting.\n`;
+      `No confirmed trade levels — engine is still waiting.\n`;
   }
 
   if (
@@ -4351,7 +4351,7 @@ function buildHourlyTelegramMessage(
       entry.bullishReasons
         .slice(0, 8)
         .map(
-          x => `â€¢ ${x}`
+          x => `• ${x}`
         )
         .join("\n") +
 
@@ -4367,7 +4367,7 @@ function buildHourlyTelegramMessage(
       entry.bearishReasons
         .slice(0, 8)
         .map(
-          x => `â€¢ ${x}`
+          x => `• ${x}`
         )
         .join("\n") +
 
@@ -4610,15 +4610,15 @@ async function goldaraScan() {
 
 function buildGoldaraTelegramMessage(x) {
   const s=x?.SIGNAL||{},l=x?.TRADE_LEVELS||{};
-  const lines=["â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”","â­ GOLDARA SPECIAL SIGNAL","â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”","",`XAUUSD ${s.direction||"WAITING"}`,`Status: ${s.status||"WAITING"}`,`Entry: ${l.entry??x?.currentPrice??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,`TP1: ${l.takeProfit?.TP1??"N/A"}`,`TP2: ${l.takeProfit?.TP2??"N/A"}`,`TP3: ${l.takeProfit?.TP3??"N/A"}`,`RR: ${l.rr??"N/A"}`,"",`Confluence: ${s.score??0}/${s.maxScore??12}`,"",`1H: ${x?.MTF?.["1H"]||"N/A"}`,`15M: ${x?.MTF?.["15M"]||"N/A"}`,`5M: ${x?.MTF?.["5M"]||"N/A"}`,`15M BOS: ${x?.SMC?.["15M"]?.BOS||"None"}`,`15M CHoCH: ${x?.SMC?.["15M"]?.CHoCH||"None"}`,`5M BOS: ${x?.SMC?.["5M"]?.BOS||"None"}`,`Liquidity: ${x?.SMC?.["5M"]?.Liquidity||"None"}`];
-  if(s.reasons?.length) lines.push("","CONFIRMATIONS",...s.reasons.slice(0,12).map(z=>`âœ“ ${z}`));
-  if(s.warnings?.length) lines.push("","WARNINGS",...s.warnings.slice(0,8).map(z=>`â€¢ ${z}`));
+  const lines=["━━━━━━━━━━━━━━━━━━━━","⭐ GOLDARA SPECIAL SIGNAL","━━━━━━━━━━━━━━━━━━━━","",`XAUUSD ${s.direction||"WAITING"}`,`Status: ${s.status||"WAITING"}`,`Entry: ${l.entry??x?.currentPrice??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,`TP1: ${l.takeProfit?.TP1??"N/A"}`,`TP2: ${l.takeProfit?.TP2??"N/A"}`,`TP3: ${l.takeProfit?.TP3??"N/A"}`,`RR: ${l.rr??"N/A"}`,"",`Confluence: ${s.score??0}/${s.maxScore??12}`,"",`1H: ${x?.MTF?.["1H"]||"N/A"}`,`15M: ${x?.MTF?.["15M"]||"N/A"}`,`5M: ${x?.MTF?.["5M"]||"N/A"}`,`15M BOS: ${x?.SMC?.["15M"]?.BOS||"None"}`,`15M CHoCH: ${x?.SMC?.["15M"]?.CHoCH||"None"}`,`5M BOS: ${x?.SMC?.["5M"]?.BOS||"None"}`,`Liquidity: ${x?.SMC?.["5M"]?.Liquidity||"None"}`];
+  if(s.reasons?.length) lines.push("","CONFIRMATIONS",...s.reasons.slice(0,12).map(z=>`✓ ${z}`));
+  if(s.warnings?.length) lines.push("","WARNINGS",...s.warnings.slice(0,8).map(z=>`• ${z}`));
   lines.push("",`Time: ${new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata",hour12:false})} IST`); return lines.join("\n");
 }
 
 function buildGoldaraWaitingMessage(x) {
   const s=x?.SIGNAL||{},b=x?.SETUPS?.BUY||{},s2=x?.SETUPS?.SELL||{};
-  return ["â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”","ðŸŸ¡ GOLDARA SPECIAL SCAN","â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”","",`Status: ${s.status||"WAITING"}`,`Price: ${x?.currentPrice??"N/A"}`,`BUY score: ${b.score??0}/12`,`SELL score: ${s2.score??0}/12`,`1H: ${x?.MTF?.["1H"]||"N/A"}`,`15M: ${x?.MTF?.["15M"]||"N/A"}`,`5M: ${x?.MTF?.["5M"]||"N/A"}`,"","No confirmed Goldara signal at this moment.","This separate engine will alert only when its required conditions are met."].join("\n");
+  return ["━━━━━━━━━━━━━━━━━━━━","🟡 GOLDARA SPECIAL SCAN","━━━━━━━━━━━━━━━━━━━━","",`Status: ${s.status||"WAITING"}`,`Price: ${x?.currentPrice??"N/A"}`,`BUY score: ${b.score??0}/12`,`SELL score: ${s2.score??0}/12`,`1H: ${x?.MTF?.["1H"]||"N/A"}`,`15M: ${x?.MTF?.["15M"]||"N/A"}`,`5M: ${x?.MTF?.["5M"]||"N/A"}`,"","No confirmed Goldara signal at this moment.","This separate engine will alert only when its required conditions are met."].join("\n");
 }
 
 async function runGoldaraMonitor(){
@@ -4637,27 +4637,27 @@ let telegramTrendlineMonitorEnabled = true;
 
 function telegramCommandHelp() {
   return [
-    "ðŸ¤– XAUUSD AI BOT â€” COMMANDS",
+    "🤖 XAUUSD AI BOT — COMMANDS",
     "",
-    "/help â€” Show all commands",
-    "/start â€” Bot online status + commands",
-    "/status â€” Bot/Telegram/monitor status",
-    "/health â€” Data + engine health",
-    "/signal â€” Fresh XAUUSD signal analysis",
-    "/analyze â€” Full fresh MTF analysis",
-    "/trendline â€” Fresh trendline analysis",
-    "/startmonitor â€” Start 60s trendline monitor",
-    "/stopmonitor â€” Stop 60s trendline monitor",
-    "/telegramtest â€” Test outgoing Telegram",
+    "/help — Show all commands",
+    "/start — Bot online status + commands",
+    "/status — Bot/Telegram/monitor status",
+    "/health — Data + engine health",
+    "/signal — Fresh XAUUSD signal analysis",
+    "/analyze — Full fresh MTF analysis",
+    "/trendline — Fresh trendline analysis",
+    "/startmonitor — Start 60s trendline monitor",
+    "/stopmonitor — Stop 60s trendline monitor",
+    "/telegramtest — Test outgoing Telegram",
     "",
-    "â­ GOLDARA SPECIAL SIGNALS",
-    "/goldara_help â€” Goldara commands",
-    "/goldara â€” Fresh Goldara scan",
-    "/goldara_signal â€” Fresh Goldara signal only",
-    "/goldara_status â€” Goldara engine status",
-    "/goldara_start â€” Start Goldara auto alerts",
-    "/goldara_stop â€” Stop Goldara auto alerts",
-    "/goldara_volume â€” Goldara 5M volume",
+    "⭐ GOLDARA SPECIAL SIGNALS",
+    "/goldara_help — Goldara commands",
+    "/goldara — Fresh Goldara scan",
+    "/goldara_signal — Fresh Goldara signal only",
+    "/goldara_status — Goldara engine status",
+    "/goldara_start — Start Goldara auto alerts",
+    "/goldara_stop — Stop Goldara auto alerts",
+    "/goldara_volume — Goldara 5M volume",
     "",
     "Instrument: XAUUSD",
     "Timeframes: 1H / 15M / 5M",
@@ -4682,7 +4682,7 @@ function telegramSignalSummary(mtf) {
   const e = mtf?.ENTRY_CONFIRMATION || {};
   const levels = mtf?.TRADE_LEVELS || null;
   const lines = [
-    "ðŸ“¡ XAUUSD SIGNAL",
+    "📡 XAUUSD SIGNAL",
     "",
     `Status: ${e.status || "WAITING"}`,
     `Direction: ${e.direction || "None"}`,
@@ -4708,10 +4708,10 @@ function telegramSignalSummary(mtf) {
     lines.push("", "No confirmed trade levels right now.");
   }
   if (e.bullishReasons?.length) {
-    lines.push("", "BULLISH", ...e.bullishReasons.slice(0, 6).map(x => `â€¢ ${x}`));
+    lines.push("", "BULLISH", ...e.bullishReasons.slice(0, 6).map(x => `• ${x}`));
   }
   if (e.bearishReasons?.length) {
-    lines.push("", "BEARISH", ...e.bearishReasons.slice(0, 6).map(x => `â€¢ ${x}`));
+    lines.push("", "BEARISH", ...e.bearishReasons.slice(0, 6).map(x => `• ${x}`));
   }
   return lines.join("\n");
 }
@@ -4723,7 +4723,7 @@ async function handleTelegramCommand(message) {
 
   try {
     if (command === "/goldara_help") {
-      await sendTelegramMessage(["â­ GOLDARA SPECIAL SIGNAL ENGINE","","/goldara â€” Fresh Goldara scan","/goldara_signal â€” Signal/WAITING result","/goldara_status â€” Engine + last signal status","/goldara_start â€” Start automatic Goldara alerts","/goldara_stop â€” Stop automatic Goldara alerts","/goldara_volume â€” Current 5M volume","","Strategy: MTF trend + 15M structure + BOS/CHoCH + fresh 5M displacement BOS + liquidity + FVG/OB + momentum + candle confirmation.","Mode: Telegram signal only â€” no trade execution by this Goldara layer."].join("\n"));
+      await sendTelegramMessage(["⭐ GOLDARA SPECIAL SIGNAL ENGINE","","/goldara — Fresh Goldara scan","/goldara_signal — Signal/WAITING result","/goldara_status — Engine + last signal status","/goldara_start — Start automatic Goldara alerts","/goldara_stop — Stop automatic Goldara alerts","/goldara_volume — Current 5M volume","","Strategy: MTF trend + 15M structure + BOS/CHoCH + fresh 5M displacement BOS + liquidity + FVG/OB + momentum + candle confirmation.","Mode: Telegram signal only — no trade execution by this Goldara layer."].join("\n"));
       return;
     }
     if (command === "/goldara" || command === "/goldara_signal") {
@@ -4733,19 +4733,19 @@ async function handleTelegramCommand(message) {
     }
     if (command === "/goldara_status") {
       const s=goldaraLastScan?.SIGNAL||{},l=goldaraLastScan?.TRADE_LEVELS||{};
-      await sendTelegramMessage(["â­ GOLDARA STATUS","",`Auto alerts: ${goldaraMonitorEnabled?"ON":"OFF"}`,`Monitor busy: ${goldaraMonitorBusy?"YES":"NO"}`,`Last scan: ${goldaraLastScan?.generatedAt||"N/A"}`,`Last Telegram: ${goldaraLastTelegram?.sent?"SENT":"N/A"}`,`Last error: ${goldaraLastError||"None"}`,"",`Signal: ${s.status||"WAITING"}`,`Direction: ${s.direction||"None"}`,`Score: ${s.score??0}/${s.maxScore??12}`,`Entry: ${l.entry??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,`TP1: ${l.takeProfit?.TP1??"N/A"}`,`TP2: ${l.takeProfit?.TP2??"N/A"}`,`TP3: ${l.takeProfit?.TP3??"N/A"}`].join("\n"));
+      await sendTelegramMessage(["⭐ GOLDARA STATUS","",`Auto alerts: ${goldaraMonitorEnabled?"ON":"OFF"}`,`Monitor busy: ${goldaraMonitorBusy?"YES":"NO"}`,`Last scan: ${goldaraLastScan?.generatedAt||"N/A"}`,`Last Telegram: ${goldaraLastTelegram?.sent?"SENT":"N/A"}`,`Last error: ${goldaraLastError||"None"}`,"",`Signal: ${s.status||"WAITING"}`,`Direction: ${s.direction||"None"}`,`Score: ${s.score??0}/${s.maxScore??12}`,`Entry: ${l.entry??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,`TP1: ${l.takeProfit?.TP1??"N/A"}`,`TP2: ${l.takeProfit?.TP2??"N/A"}`,`TP3: ${l.takeProfit?.TP3??"N/A"}`].join("\n"));
       return;
     }
     if (command === "/goldara_start") {
       goldaraMonitorEnabled=true; setTimeout(runGoldaraMonitor,0);
-      await sendTelegramMessage("â–¶ï¸ GOLDARA SPECIAL AUTO ALERTS STARTED.\n\nScan interval: 60 seconds."); return;
+      await sendTelegramMessage("▶️ GOLDARA SPECIAL AUTO ALERTS STARTED.\n\nScan interval: 60 seconds."); return;
     }
     if (command === "/goldara_stop") {
       goldaraMonitorEnabled=false;
-      await sendTelegramMessage("â¹ï¸ GOLDARA SPECIAL AUTO ALERTS STOPPED.\n\nUse /goldara_start to resume."); return;
+      await sendTelegramMessage("⏹️ GOLDARA SPECIAL AUTO ALERTS STOPPED.\n\nUse /goldara_start to resume."); return;
     }
     if (command === "/goldara_volume") {
-      try{const c=await getCandles(TF["5M"],100),v=c.map(x=>x.volume).filter(Number.isFinite);if(v.length<20){await sendTelegramMessage("âš ï¸ Goldara 5M volume data unavailable.");return;}const current=last(v),average=avg(v.slice(-20)),ratio=average?current/average:null,state=ratio==null?"Unknown":ratio>=1.5?"HIGH VOLUME":ratio>=1.1?"ABOVE AVERAGE":ratio<=0.7?"LOW VOLUME":"Normal";await sendTelegramMessage(["â­ GOLDARA 5M VOLUME","",`Current: ${round(current,2)}`,`20-candle average: ${round(average,2)}`,`Ratio: ${ratio==null?"N/A":round(ratio,2)+"x"}`,`State: ${state}`].join("\n"));}catch(e){await sendTelegramMessage(`âŒ Goldara volume error: ${e.message}`);} return;
+      try{const c=await getCandles(TF["5M"],100),v=c.map(x=>x.volume).filter(Number.isFinite);if(v.length<20){await sendTelegramMessage("⚠️ Goldara 5M volume data unavailable.");return;}const current=last(v),average=avg(v.slice(-20)),ratio=average?current/average:null,state=ratio==null?"Unknown":ratio>=1.5?"HIGH VOLUME":ratio>=1.1?"ABOVE AVERAGE":ratio<=0.7?"LOW VOLUME":"Normal";await sendTelegramMessage(["⭐ GOLDARA 5M VOLUME","",`Current: ${round(current,2)}`,`20-candle average: ${round(average,2)}`,`Ratio: ${ratio==null?"N/A":round(ratio,2)+"x"}`,`State: ${state}`].join("\n"));}catch(e){await sendTelegramMessage(`❌ Goldara volume error: ${e.message}`);} return;
     }
 
     if (command === "/help" || command === "/start") {
@@ -4755,7 +4755,7 @@ async function handleTelegramCommand(message) {
 
     if (command === "/status") {
       await sendTelegramMessage([
-        "ðŸ“Š XAUUSD BOT STATUS",
+        "📊 XAUUSD BOT STATUS",
         "",
         `Telegram configured: ${TELEGRAM_BOT_TOKEN ? "YES" : "NO"}`,
         `Telegram polling: ${telegramPollingRunning ? "RUNNING" : "READY"}`,
@@ -4779,13 +4779,13 @@ async function handleTelegramCommand(message) {
         const candles = await getCandles(TF["5M"], 80);
         checks.push(`5M candles: ${candles.length >= 60 ? "OK" : "LOW"} (${candles.length})`);
       } catch (e) {
-        checks.push(`5M candles: ERROR â€” ${e.message}`);
+        checks.push(`5M candles: ERROR — ${e.message}`);
       }
       checks.push(`Telegram token: ${TELEGRAM_BOT_TOKEN ? "OK" : "MISSING"}`);
       checks.push(`Telegram chat ID: ${TELEGRAM_CHAT_ID ? "OK" : "MISSING"}`);
       checks.push(`Trendline monitor: ${telegramTrendlineMonitorEnabled ? "ON" : "OFF"}`);
       checks.push(`HF engine: ${HF_STATE ? "LOADED" : "MISSING"}`);
-      await sendTelegramMessage("ðŸ©º XAUUSD HEALTH\n\n" + checks.join("\n"));
+      await sendTelegramMessage("🩺 XAUUSD HEALTH\n\n" + checks.join("\n"));
       return;
     }
 
@@ -4805,7 +4805,7 @@ async function handleTelegramCommand(message) {
       const primary = result?.TRENDLINE_SIGNAL || {};
       const levels = result?.TRADE_LEVELS || {};
       const lines = [
-        "ðŸ“ˆ XAUUSD TRENDLINE",
+        "📈 XAUUSD TRENDLINE",
         "",
         `Status: ${primary.status || "WAITING"}`,
         `Direction: ${primary.direction || "None"}`,
@@ -4825,26 +4825,26 @@ async function handleTelegramCommand(message) {
       if (typeof monitorTrendlineSignal === "function") {
         setTimeout(monitorTrendlineSignal, 0);
       }
-      await sendTelegramMessage("âœ… Trendline monitor STARTED.\n\nAutomatic scan interval: 60 seconds.");
+      await sendTelegramMessage("✅ Trendline monitor STARTED.\n\nAutomatic scan interval: 60 seconds.");
       return;
     }
 
     if (command === "/stopmonitor") {
       telegramTrendlineMonitorEnabled = false;
-      await sendTelegramMessage("ðŸ›‘ Trendline monitor STOPPED.\n\nNo automatic trendline scans will run until /startmonitor.");
+      await sendTelegramMessage("🛑 Trendline monitor STOPPED.\n\nNo automatic trendline scans will run until /startmonitor.");
       return;
     }
 
     if (command === "/telegramtest") {
-      const result = await sendTelegramMessage("âœ… Telegram command system is working.\n\nXAUUSD bot can receive and send commands.");
+      const result = await sendTelegramMessage("✅ Telegram command system is working.\n\nXAUUSD bot can receive and send commands.");
       if (!result?.sent) console.log("Telegram command test failed:", result);
       return;
     }
 
-    await sendTelegramMessage("â“ Unknown command. Send /help");
+    await sendTelegramMessage("❓ Unknown command. Send /help");
   } catch (error) {
     telegramLastPollError = error.message;
-    await sendTelegramMessage(`âŒ Command ${command} failed\n\n${error.message}`);
+    await sendTelegramMessage(`❌ Command ${command} failed\n\n${error.message}`);
   }
 }
 
@@ -4956,16 +4956,16 @@ function getOppositeDangerForTimeframe(result, timeframe) {
 function buildDangerTelegramMessage(result,danger) {
   const activeTrade=activeTrendlineTrades.get(danger.timeframe);
   const active=activeTrade?.direction||"UNKNOWN";
-  let message=`âš ï¸ XAUUSD ${danger.level} ALERT\n\n`+
+  let message=`⚠️ XAUUSD ${danger.level} ALERT\n\n`+
     `Trade timeframe: ${danger.timeframe}\n`+
     `Active trade: ${active}\n`+
     `Opposite setup: ${danger.direction||"UNKNOWN"}\n`+
     `Price: ${result?.currentPrice??"N/A"}\n`+
     `${danger.timeframe} opposite score: ${danger.score??0}/11\n\n`;
-  if(danger.level==="CRITICAL") message+=`ðŸš¨ ACTION: CLOSE THE ${active} ${danger.timeframe} TRADE\nConfirmed opposite ${danger.direction} setup on the SAME timeframe.\n\n`;
-  else message+=`âš ï¸ ACTION: DANGER â€” REVIEW/CLOSE THE ${active} ${danger.timeframe} TRADE\nOpposite setup is developing on the SAME timeframe.\n\n`;
-  if(danger.reasons?.length) message+=`OPPOSITE CONFIRMATIONS\n`+danger.reasons.slice(0,8).map(x=>`â€¢ ${x}`).join("\n")+"\n";
-  if(danger.warnings?.length) message+=`\nWARNINGS\n`+danger.warnings.slice(0,6).map(x=>`â€¢ ${x}`).join("\n")+"\n";
+  if(danger.level==="CRITICAL") message+=`🚨 ACTION: CLOSE THE ${active} ${danger.timeframe} TRADE\nConfirmed opposite ${danger.direction} setup on the SAME timeframe.\n\n`;
+  else message+=`⚠️ ACTION: DANGER — REVIEW/CLOSE THE ${active} ${danger.timeframe} TRADE\nOpposite setup is developing on the SAME timeframe.\n\n`;
+  if(danger.reasons?.length) message+=`OPPOSITE CONFIRMATIONS\n`+danger.reasons.slice(0,8).map(x=>`• ${x}`).join("\n")+"\n";
+  if(danger.warnings?.length) message+=`\nWARNINGS\n`+danger.warnings.slice(0,6).map(x=>`• ${x}`).join("\n")+"\n";
   return message;
 }
 
@@ -5882,7 +5882,7 @@ app.get("/special-trendline-signal", async (req, res) => {
 
 
 /* =========================================================
-   78.31% RECOVERED STRATEGY â€” LIVE SIGNAL LAYER
+   78.31% RECOVERED STRATEGY — LIVE SIGNAL LAYER
    Execution timeframe: 5M
    Context: 1H + 15M
    Core setup: Trendline Breakout + MTF Confirmation
@@ -6227,9 +6227,9 @@ function build78TelegramMessage(decision) {
   const c = decision.context || {};
 
   return [
-    "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”",
-    "ðŸš¨ XAUUSD 78.31% STRATEGY TRADE SIGNAL",
-    "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”",
+    "━━━━━━━━━━━━━━━━━━━━",
+    "🚨 XAUUSD 78.31% STRATEGY TRADE SIGNAL",
+    "━━━━━━━━━━━━━━━━━━━━",
     `Direction: ${s.direction || "WAIT"}`,
     `Status: ${s.status || "WAITING"}`,
     `Score: ${s.score ?? 0}/${s.maxScore ?? 12}`,
@@ -6248,12 +6248,12 @@ function build78TelegramMessage(decision) {
     `TP3: ${l.takeProfit?.TP3 ?? "N/A"}`,
     "",
     "CONFIRMATIONS",
-    ...(s.confirmations || []).slice(0, 12).map(x => `â€¢ ${x}`),
-    ...(s.warnings?.length ? ["", "WARNINGS", ...s.warnings.slice(0, 6).map(x => `â€¢ ${x}`)] : []),
+    ...(s.confirmations || []).slice(0, 12).map(x => `• ${x}`),
+    ...(s.warnings?.length ? ["", "WARNINGS", ...s.warnings.slice(0, 6).map(x => `• ${x}`)] : []),
     "",
     "Strategy: Trendline Breakout + MTF Confirmation + Retest/Continuation",
     "Execution: 5M | Context: 1H + 15M",
-    "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”"
+    "━━━━━━━━━━━━━━━━━━━━"
   ].join("\n");
 }
 
@@ -6323,6 +6323,163 @@ app.get("/strategy78/status", (req, res) => {
 // confirmed 78.31% setup appears; WAITING/WATCHING states do not alert.
 setTimeout(scan78StrategyAndAlert, 20000);
 setInterval(scan78StrategyAndAlert, 60 * 1000);
+
+
+/* =========================================================
+   RAHUL 78% — SEPARATE STRATEGY SECTION
+   XAUUSD | 5M execution | 1H + 15M context
+   Historical test: 355 trades | 278W | 77L | 78.31%
+   Net R: +256.6R
+
+   This section is intentionally separate from the other engines.
+   It reuses the recovered 78% signal engine above, but exposes
+   dedicated Rahul 78% endpoints and Telegram identity so the
+   Liquid Chart executor can use this section independently.
+========================================================= */
+
+let rahul78LastSignalKey = null;
+let rahul78LastTelegram = null;
+let rahul78LastScanAt = null;
+let rahul78LastError = null;
+
+function rahul78DecisionFromBase(base) {
+  if (!base || base.success === false) return base;
+
+  const out = JSON.parse(JSON.stringify(base));
+  out.strategy = "Rahul 78%";
+  out.strategyName = "RAHUL 78% — XAUUSD Trendline Breakout";
+  out.instrument = "XAUUSD";
+  out.executionTimeframe = "5M";
+  out.contextTimeframes = ["1H", "15M"];
+  out.historicalBacktest = {
+    trades: 355,
+    wins: 278,
+    losses: 77,
+    winRate: 78.31,
+    netR: 256.6,
+    buyWins: 117,
+    buyLosses: 31,
+    sellWins: 161,
+    sellLosses: 46
+  };
+  out.livePerformanceWarning = "Historical backtest only; live performance is not guaranteed.";
+  return out;
+}
+
+function buildRahul78TelegramMessage(decision) {
+  const s = decision?.signal || {};
+  const l = decision?.tradeLevels || {};
+  return [
+    "━━━━━━━━━━━━━━━━━━━━",
+    "🚨 RAHUL 78% — XAUUSD",
+    "━━━━━━━━━━━━━━━━━━━━",
+    `Direction: ${s.direction || "WAIT"}`,
+    `Status: ${s.status || "WAITING"}`,
+    `Score: ${s.score ?? 0}/${s.maxScore ?? 11}`,
+    `Price: ${decision?.currentPrice ?? "N/A"}`,
+    "",
+    "TRADE LEVELS",
+    `Entry: ${l.entry ?? "N/A"}`,
+    `SL: ${l.stopLoss ?? "N/A"}`,
+    `TP1: ${l.takeProfit?.TP1 ?? "N/A"}`,
+    `TP2: ${l.takeProfit?.TP2 ?? "N/A"}`,
+    `TP3: ${l.takeProfit?.TP3 ?? "N/A"}`,
+    "",
+    "Strategy: Trendline Breakout + MTF Confirmation + Retest/Continuation",
+    "Execution: 5M | Context: 1H + 15M",
+    "Historical: 355 trades | 78.31% | +256.6R",
+    "━━━━━━━━━━━━━━━━━━━━"
+  ].join("\n");
+}
+
+async function scanRahul78() {
+  try {
+    rahul78LastScanAt = new Date().toISOString();
+
+    // Use the recovered 78% engine already present in this server.
+    const base = await scan78StrategyAndAlert();
+    const decision = rahul78DecisionFromBase(base);
+    rahul78LastError = null;
+
+    if (!decision || decision.success === false || !decision.executable) {
+      return decision;
+    }
+
+    const direction = decision.signal?.direction;
+    const levels = decision.tradeLevels || {};
+    const tl = decision.trendline || {};
+    const key = [
+      direction,
+      levels.entry,
+      levels.stopLoss,
+      levels.takeProfit?.TP1,
+      JSON.stringify(tl)
+    ].join("|");
+
+    if (key !== rahul78LastSignalKey) {
+      const telegram = await sendTelegramMessage(
+        buildRahul78TelegramMessage(decision)
+      );
+
+      rahul78LastTelegram = {
+        ...telegram,
+        attemptedAt: new Date().toISOString(),
+        signalKey: key
+      };
+
+      if (telegram?.sent) {
+        rahul78LastSignalKey = key;
+        console.log("RAHUL 78% Telegram signal sent:", key);
+      }
+    }
+
+    return decision;
+  } catch (error) {
+    rahul78LastError = error.message;
+    console.log("RAHUL 78% scan error:", error.message);
+    return {
+      success: false,
+      strategy: "Rahul 78%",
+      instrument: "XAUUSD",
+      status: "ERROR",
+      error: error.message
+    };
+  }
+}
+
+// Dedicated Rahul 78% endpoint for Liquid Chart / external executor.
+app.get("/rahul78/decision", async (req, res) => {
+  const result = await scanRahul78();
+  res.status(result?.success === false ? 500 : 200).json(result);
+});
+
+app.get("/rahul78/status", (req, res) => {
+  res.json({
+    success: true,
+    strategy: "Rahul 78%",
+    strategyName: "RAHUL 78% — XAUUSD Trendline Breakout",
+    instrument: "XAUUSD",
+    executionTimeframe: "5M",
+    contextTimeframes: ["1H", "15M"],
+    status: "RUNNING",
+    historicalBacktest: {
+      trades: 355,
+      wins: 278,
+      losses: 77,
+      winRate: 78.31,
+      netR: 256.6
+    },
+    lastScanAt: rahul78LastScanAt,
+    lastSignalKey: rahul78LastSignalKey,
+    lastTelegram: rahul78LastTelegram,
+    lastError: rahul78LastError
+  });
+});
+
+// Keep a dedicated Rahul 78% monitor. It is independent from the
+// main engine endpoints and only alerts on a new confirmed setup.
+setTimeout(scanRahul78, 30000);
+setInterval(scanRahul78, 60 * 1000);
 
 /* =========================================================
    SERVER
