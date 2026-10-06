@@ -30,15 +30,9 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID =
   process.env.TELEGRAM_CHAT_ID || "710410869";
 
-// Rahul 78% signals use the SAME Telegram chat as the main AI.
-// No separate TELEGRAM_78_CHAT_ID is required.
+// All three automatic Telegram streams use the SAME Telegram chat.
+// Their ON/OFF state is controlled from Telegram commands.
 const TELEGRAM_78_CHAT_ID = TELEGRAM_CHAT_ID;
-
-// IMPORTANT: only ONE Render service may call Telegram getUpdates.
-// Keep command polling OFF in this 78% service when the main AI service
-// is already polling the same bot.
-const TELEGRAM_COMMAND_POLLING_ENABLED =
-  String(process.env.TELEGRAM_COMMAND_POLLING_ENABLED || "false").toLowerCase() === "true";
 
 const SYMBOL = "XAU/USD";
 const OUTPUT_SYMBOL = "XAUUSD";
@@ -314,10 +308,10 @@ async function getCandles(
 ========================================================= */
 
 async function sendRahul78TelegramMessage(message) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_78_CHAT_ID) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID || !telegramRahul78Enabled) {
     return {
       sent: false,
-      reason: "78% Telegram environment variables not configured"
+      reason: telegramRahul78Enabled ? "Telegram environment variables not configured" : "RAHUL 78% Telegram alerts are OFF"
     };
   }
 
@@ -335,7 +329,7 @@ async function sendRahul78TelegramMessage(message) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            chat_id: TELEGRAM_78_CHAT_ID,
+            chat_id: TELEGRAM_CHAT_ID,
             text: chunk
           })
         }
@@ -345,9 +339,9 @@ async function sendRahul78TelegramMessage(message) {
         throw new Error(data.description || "78% Telegram sendMessage failed");
       }
     }
-    return { sent: true, chunks: chunks.length, chatId: String(TELEGRAM_78_CHAT_ID) };
+    return { sent: true, chunks: chunks.length, chatId: String(TELEGRAM_CHAT_ID) };
   } catch (error) {
-    return { sent: false, error: error.message, chatId: String(TELEGRAM_78_CHAT_ID) };
+    return { sent: false, error: error.message, chatId: String(TELEGRAM_CHAT_ID) };
   }
 }
 
@@ -4447,6 +4441,11 @@ function buildHourlyTelegramMessage(
 }
 
 async function sendHourlyTelegramStatus() {
+  if (!telegramHourlyEnabled) {
+    console.log("Hourly Telegram status skipped: OFF");
+    return { sent: false, reason: "Hourly Telegram alerts are OFF" };
+  }
+
   try {
     const mtf =
       await mtfAnalysis();
@@ -4681,7 +4680,17 @@ let telegramPollingRunning = false;
 let telegramLastPollAt = null;
 let telegramLastPollError = null;
 let telegramCommandTimer = null;
-let telegramTrendlineMonitorEnabled = true;
+
+// =========================================================
+// TELEGRAM AUTO-ALERT CONTROLS
+// 1) Independent Trendline
+// 2) RAHUL 78%
+// 3) Hourly Status
+// All three use TELEGRAM_CHAT_ID and can be toggled from Telegram.
+// =========================================================
+let telegramTrendlineMonitorEnabled = process.env.TELEGRAM_TRENDLINE_ENABLED !== "false";
+let telegramRahul78Enabled = process.env.TELEGRAM_78_ENABLED !== "false";
+let telegramHourlyEnabled = process.env.TELEGRAM_HOURLY_ENABLED !== "false";
 
 function telegramCommandHelp() {
   return [
@@ -4696,6 +4705,15 @@ function telegramCommandHelp() {
     "/trendline — Fresh trendline analysis",
     "/startmonitor — Start 60s trendline monitor",
     "/stopmonitor — Stop 60s trendline monitor",
+    "",
+    "🔔 AUTO TELEGRAM CONTROLS",
+    "/trendline_on — Independent Trendline alerts ON",
+    "/trendline_off — Independent Trendline alerts OFF",
+    "/rahul78_on — RAHUL 78% alerts ON",
+    "/rahul78_off — RAHUL 78% alerts OFF",
+    "/hourly_on — Hourly status ON",
+    "/hourly_off — Hourly status OFF",
+    "/telegram_controls — Show all three ON/OFF states",
     "/telegramtest — Test outgoing Telegram",
     "",
     "⭐ GOLDARA SPECIAL SIGNALS",
@@ -4809,8 +4827,10 @@ async function handleTelegramCommand(message) {
         `Telegram polling: ${telegramPollingRunning ? "RUNNING" : "READY"}`,
         `Last Telegram poll: ${telegramLastPollAt || "N/A"}`,
         `Poll error: ${telegramLastPollError || "None"}`,
-        `Trendline monitor: ${telegramTrendlineMonitorEnabled ? "ON" : "OFF"}`,
-        `Trendline running: ${trendlineMonitorRunning ? "YES" : "NO"}`,
+        `Independent Trendline Telegram: ${telegramTrendlineMonitorEnabled ? "ON" : "OFF"}`,
+        `RAHUL 78% Telegram: ${telegramRahul78Enabled ? "ON" : "OFF"}`,
+        `Hourly Telegram: ${telegramHourlyEnabled ? "ON" : "OFF"}`,
+        `Trendline monitor running: ${trendlineMonitorRunning ? "YES" : "NO"}`,
         `Last trendline scan: ${lastTrendlineMonitorFinishedAt || "N/A"}`,
         `Last trendline error: ${lastTrendlineMonitorError || "None"}`,
         `Last trendline signal: ${lastTrendlineMonitorSignal?.status || "N/A"}`,
@@ -4831,7 +4851,9 @@ async function handleTelegramCommand(message) {
       }
       checks.push(`Telegram token: ${TELEGRAM_BOT_TOKEN ? "OK" : "MISSING"}`);
       checks.push(`Telegram chat ID: ${TELEGRAM_CHAT_ID ? "OK" : "MISSING"}`);
-      checks.push(`Trendline monitor: ${telegramTrendlineMonitorEnabled ? "ON" : "OFF"}`);
+      checks.push(`Independent Trendline Telegram: ${telegramTrendlineMonitorEnabled ? "ON" : "OFF"}`);
+      checks.push(`RAHUL 78% Telegram: ${telegramRahul78Enabled ? "ON" : "OFF"}`);
+      checks.push(`Hourly Telegram: ${telegramHourlyEnabled ? "ON" : "OFF"}`);
       checks.push(`HF engine: ${HF_STATE ? "LOADED" : "MISSING"}`);
       await sendTelegramMessage("🩺 XAUUSD HEALTH\n\n" + checks.join("\n"));
       return;
@@ -4865,6 +4887,58 @@ async function handleTelegramCommand(message) {
         `TP1: ${levels.takeProfit?.TP1 ?? levels.takeProfit?.TP1_1R ?? "N/A"}`
       ];
       await sendTelegramMessage(lines.join("\n"));
+      return;
+    }
+
+    if (command === "/telegram_controls") {
+      await sendTelegramMessage([
+        "🔔 TELEGRAM AUTO-ALERT CONTROLS",
+        "",
+        `Independent Trendline: ${telegramTrendlineMonitorEnabled ? "🟢 ON" : "🔴 OFF"}`,
+        `RAHUL 78%: ${telegramRahul78Enabled ? "🟢 ON" : "🔴 OFF"}`,
+        `Hourly Status: ${telegramHourlyEnabled ? "🟢 ON" : "🔴 OFF"}`,
+        "",
+        "Commands:",
+        "/trendline_on /trendline_off",
+        "/rahul78_on /rahul78_off",
+        "/hourly_on /hourly_off"
+      ].join("\n"));
+      return;
+    }
+
+    if (command === "/trendline_on") {
+      telegramTrendlineMonitorEnabled = true;
+      await sendTelegramMessage("🟢 Independent Trendline Telegram alerts are ON.\n\nAutomatic confirmed Trendline signals will be sent.");
+      return;
+    }
+
+    if (command === "/trendline_off") {
+      telegramTrendlineMonitorEnabled = false;
+      await sendTelegramMessage("🔴 Independent Trendline Telegram alerts are OFF.\n\nThe Trendline monitor remains running, but automatic Trendline alerts will not be sent.");
+      return;
+    }
+
+    if (command === "/rahul78_on") {
+      telegramRahul78Enabled = true;
+      await sendTelegramMessage("🟢 RAHUL 78% Telegram alerts are ON.");
+      return;
+    }
+
+    if (command === "/rahul78_off") {
+      telegramRahul78Enabled = false;
+      await sendTelegramMessage("🔴 RAHUL 78% Telegram alerts are OFF.\n\nThe RAHUL 78% strategy scan remains running, but automatic 78% alerts will not be sent.");
+      return;
+    }
+
+    if (command === "/hourly_on") {
+      telegramHourlyEnabled = true;
+      await sendTelegramMessage("🟢 Hourly Telegram status is ON.");
+      return;
+    }
+
+    if (command === "/hourly_off") {
+      telegramHourlyEnabled = false;
+      await sendTelegramMessage("🔴 Hourly Telegram status is OFF.");
       return;
     }
 
@@ -4920,16 +4994,11 @@ async function pollTelegramCommands() {
 }
 
 async function telegramCommandLoop() {
-  if (!TELEGRAM_COMMAND_POLLING_ENABLED) return;
   await pollTelegramCommands();
   telegramCommandTimer = setTimeout(telegramCommandLoop, 3000);
 }
 
-if (TELEGRAM_COMMAND_POLLING_ENABLED) {
-  telegramCommandLoop();
-} else {
-  console.log("Telegram command polling DISABLED in Rahul 78% service; sendMessage alerts remain enabled.");
-}
+telegramCommandLoop();
 
 app.get("/goldara-signal",async(req,res)=>{try{res.json(await goldaraScan());}catch(e){res.status(500).json({success:false,error:e.message});}});
 app.get("/goldara-status",(req,res)=>res.json({success:true,instrument:OUTPUT_SYMBOL,engine:"GOLDARA_STYLE_SMC_SIGNAL",mode:"TELEGRAM_SIGNAL_ONLY",autoMonitorEnabled:goldaraMonitorEnabled,monitorBusy:goldaraMonitorBusy,lastScan:goldaraLastScan?.generatedAt||null,lastTelegram:goldaraLastTelegram,lastError:goldaraLastError,signal:goldaraLastScan?.SIGNAL||null,tradeLevels:goldaraLastScan?.TRADE_LEVELS||null}));
@@ -4943,13 +5012,13 @@ app.get("/status", (req, res) => {
     instrument: OUTPUT_SYMBOL,
     telegram78: {
       configured: !!TELEGRAM_BOT_TOKEN,
-      chatConfigured: !!TELEGRAM_78_CHAT_ID
+      chatConfigured: !!TELEGRAM_CHAT_ID,
+      enabled: telegramRahul78Enabled
     },
     telegram: {
       configured: !!TELEGRAM_BOT_TOKEN,
       chatConfigured: !!TELEGRAM_CHAT_ID,
       polling: telegramPollingRunning,
-      pollingEnabled: TELEGRAM_COMMAND_POLLING_ENABLED,
       lastPollAt: telegramLastPollAt,
       lastPollError: telegramLastPollError
     },
@@ -5065,7 +5134,7 @@ async function monitorTrendlineSignal() {
         trendlineSignalLifecycle.set(tf, "WAITING");
       }
 
-      if(eligible&&key&&previousKey!==key){
+      if(telegramTrendlineMonitorEnabled && eligible&&key&&previousKey!==key){
         const telegram=await sendTelegramMessage(buildTrendlineTelegramMessage({...result,TRENDLINE_SIGNAL:{...signal,signalTimeframe:tf},TRADE_LEVELS:levels}));
         lastTrendlineTelegramResult={...telegram,attemptedAt:new Date().toISOString(),alertKey:key,timeframe:tf};
         if(telegram?.sent){
@@ -6531,6 +6600,7 @@ app.get("/rahul78/status", (req, res) => {
     lastSignalKey: rahul78LastSignalKey,
     lastTelegram: rahul78LastTelegram,
     telegramChatConfigured: !!TELEGRAM_CHAT_ID,
+    telegramEnabled: telegramRahul78Enabled,
     lastError: rahul78LastError
   });
 });
