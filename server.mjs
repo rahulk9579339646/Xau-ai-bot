@@ -30,6 +30,16 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID =
   process.env.TELEGRAM_CHAT_ID || "710410869";
 
+// Rahul 78% signals use the SAME Telegram chat as the main AI.
+// No separate TELEGRAM_78_CHAT_ID is required.
+const TELEGRAM_78_CHAT_ID = TELEGRAM_CHAT_ID;
+
+// IMPORTANT: only ONE Render service may call Telegram getUpdates.
+// Keep command polling OFF in this 78% service when the main AI service
+// is already polling the same bot.
+const TELEGRAM_COMMAND_POLLING_ENABLED =
+  String(process.env.TELEGRAM_COMMAND_POLLING_ENABLED || "false").toLowerCase() === "true";
+
 const SYMBOL = "XAU/USD";
 const OUTPUT_SYMBOL = "XAUUSD";
 
@@ -302,6 +312,44 @@ async function getCandles(
 /* =========================================================
    TELEGRAM
 ========================================================= */
+
+async function sendRahul78TelegramMessage(message) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_78_CHAT_ID) {
+    return {
+      sent: false,
+      reason: "78% Telegram environment variables not configured"
+    };
+  }
+
+  const chunks = [];
+  const textMessage = String(message ?? "");
+  for (let i = 0; i < textMessage.length; i += 3900) {
+    chunks.push(textMessage.slice(i, i + 3900));
+  }
+
+  try {
+    for (const chunk of chunks) {
+      const response = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: TELEGRAM_78_CHAT_ID,
+            text: chunk
+          })
+        }
+      );
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.description || "78% Telegram sendMessage failed");
+      }
+    }
+    return { sent: true, chunks: chunks.length, chatId: String(TELEGRAM_78_CHAT_ID) };
+  } catch (error) {
+    return { sent: false, error: error.message, chatId: String(TELEGRAM_78_CHAT_ID) };
+  }
+}
 
 async function sendTelegramMessage(message) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -4872,11 +4920,16 @@ async function pollTelegramCommands() {
 }
 
 async function telegramCommandLoop() {
+  if (!TELEGRAM_COMMAND_POLLING_ENABLED) return;
   await pollTelegramCommands();
   telegramCommandTimer = setTimeout(telegramCommandLoop, 3000);
 }
 
-telegramCommandLoop();
+if (TELEGRAM_COMMAND_POLLING_ENABLED) {
+  telegramCommandLoop();
+} else {
+  console.log("Telegram command polling DISABLED in Rahul 78% service; sendMessage alerts remain enabled.");
+}
 
 app.get("/goldara-signal",async(req,res)=>{try{res.json(await goldaraScan());}catch(e){res.status(500).json({success:false,error:e.message});}});
 app.get("/goldara-status",(req,res)=>res.json({success:true,instrument:OUTPUT_SYMBOL,engine:"GOLDARA_STYLE_SMC_SIGNAL",mode:"TELEGRAM_SIGNAL_ONLY",autoMonitorEnabled:goldaraMonitorEnabled,monitorBusy:goldaraMonitorBusy,lastScan:goldaraLastScan?.generatedAt||null,lastTelegram:goldaraLastTelegram,lastError:goldaraLastError,signal:goldaraLastScan?.SIGNAL||null,tradeLevels:goldaraLastScan?.TRADE_LEVELS||null}));
@@ -4888,10 +4941,15 @@ app.get("/status", (req, res) => {
   res.json({
     success: true,
     instrument: OUTPUT_SYMBOL,
+    telegram78: {
+      configured: !!TELEGRAM_BOT_TOKEN,
+      chatConfigured: !!TELEGRAM_78_CHAT_ID
+    },
     telegram: {
       configured: !!TELEGRAM_BOT_TOKEN,
       chatConfigured: !!TELEGRAM_CHAT_ID,
       polling: telegramPollingRunning,
+      pollingEnabled: TELEGRAM_COMMAND_POLLING_ENABLED,
       lastPollAt: telegramLastPollAt,
       lastPollError: telegramLastPollError
     },
@@ -6417,7 +6475,7 @@ async function scanRahul78() {
     ].join("|");
 
     if (key !== rahul78LastSignalKey) {
-      const telegram = await sendTelegramMessage(
+      const telegram = await sendRahul78TelegramMessage(
         buildRahul78TelegramMessage(decision)
       );
 
@@ -6472,6 +6530,7 @@ app.get("/rahul78/status", (req, res) => {
     lastScanAt: rahul78LastScanAt,
     lastSignalKey: rahul78LastSignalKey,
     lastTelegram: rahul78LastTelegram,
+    telegramChatConfigured: !!TELEGRAM_CHAT_ID,
     lastError: rahul78LastError
   });
 });
