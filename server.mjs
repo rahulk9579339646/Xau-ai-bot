@@ -965,12 +965,38 @@ async function p78Scan(){
 
   const candidates = [];
 
+  /*
+  Latest actual MTF score.
+  This is ONLY for displaying the score
+  when P78 is WAITING.
+  It does NOT change any P78 condition.
+  */
+
+  let latestMtfScore = 0;
+
   for(const s of raw){
 
     const k = s.idx;
 
     if(k >= c5.length-1)
       continue;
+
+    /*
+    Calculate MTF score before the other
+    P78 filters so the actual score can
+    still be displayed even when another
+    P78 condition fails.
+    */
+
+    const mtf =
+      mtfScore(
+        c1,
+        c15,
+        s.Time,
+        s.Direction
+      );
+
+    latestMtfScore = mtf.score;
 
     const cs =
       candleStrength(
@@ -982,14 +1008,6 @@ async function p78Scan(){
 
     if(cs.strength === "Weak")
       continue;
-
-    const mtf =
-      mtfScore(
-        c1,
-        c15,
-        s.Time,
-        s.Direction
-      );
 
     if(mtf.score < 5)
       continue;
@@ -1097,7 +1115,7 @@ async function p78Scan(){
         : {
             direction:null,
             status:"WAITING",
-            score:0,
+            score:latestMtfScore,
             maxScore:6
           },
 
