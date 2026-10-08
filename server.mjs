@@ -728,7 +728,10 @@ function mtfScore(
     );
 
   if(i1 < 0 || i15 < 0){
-    return {score:0};
+    return {
+      score:0,
+      breakdown:null
+    };
   }
 
   const a1 = c1[i1];
@@ -742,42 +745,70 @@ function mtfScore(
     !Number.isFinite(a15.EMA50) ||
     !Number.isFinite(a15.RSI14)
   ){
-    return {score:0};
+    return {
+      score:0,
+      breakdown:null
+    };
   }
 
   let score = 0;
 
+  let h1Ema;
+  let h1Rsi;
+  let m15Ema;
+  let m15Rsi;
+
   if(direction === "BUY"){
 
-    if(a1.EMA20 > a1.EMA50)
-      score += 2;
+    h1Ema =
+      a1.EMA20 > a1.EMA50;
 
-    if(a1.RSI14 > 50)
-      score += 1;
+    h1Rsi =
+      a1.RSI14 > 50;
 
-    if(a15.EMA20 > a15.EMA50)
-      score += 2;
+    m15Ema =
+      a15.EMA20 > a15.EMA50;
 
-    if(a15.RSI14 > 50)
-      score += 1;
+    m15Rsi =
+      a15.RSI14 > 50;
 
   }else{
 
-    if(a1.EMA20 < a1.EMA50)
-      score += 2;
+    h1Ema =
+      a1.EMA20 < a1.EMA50;
 
-    if(a1.RSI14 < 50)
-      score += 1;
+    h1Rsi =
+      a1.RSI14 < 50;
 
-    if(a15.EMA20 < a15.EMA50)
-      score += 2;
+    m15Ema =
+      a15.EMA20 < a15.EMA50;
 
-    if(a15.RSI14 < 50)
-      score += 1;
+    m15Rsi =
+      a15.RSI14 < 50;
   }
+
+  if(h1Ema)
+    score += 2;
+
+  if(h1Rsi)
+    score += 1;
+
+  if(m15Ema)
+    score += 2;
+
+  if(m15Rsi)
+    score += 1;
 
   return {
     score,
+
+    breakdown:{
+      h1Ema,
+      h1Rsi,
+      m15Ema,
+      m15Rsi
+    },
+
     a1,
     a15
   };
@@ -974,6 +1005,8 @@ async function p78Scan(){
 
   let latestMtfScore = 0;
 
+  let latestMtfBreakdown = null;
+
   for(const s of raw){
 
     const k = s.idx;
@@ -997,6 +1030,17 @@ async function p78Scan(){
       );
 
     latestMtfScore = mtf.score;
+
+    latestMtfBreakdown =
+      mtf.breakdown
+        ? {
+            ...mtf.breakdown,
+            score:mtf.score,
+            maxScore:6,
+            direction:s.Direction,
+            signalTime:s.Time
+          }
+        : null;
 
     const cs =
       candleStrength(
@@ -1048,6 +1092,7 @@ async function p78Scan(){
       tp,
       risk,
       score:mtf.score,
+      mtfBreakdown:mtf.breakdown,
       strength:cs,
       retest:rt,
       trendlineSource:
@@ -1110,13 +1155,33 @@ async function p78Scan(){
             signalIndex:x.k,
             signalTime:x.signal.Time,
             candleStrength:
-              x.strength.strength
+              x.strength.strength,
+
+            mtfBreakdown:
+              x.mtfBreakdown
+                ? {
+                    h1Ema:x.mtfBreakdown.h1Ema,
+                    h1Rsi:x.mtfBreakdown.h1Rsi,
+                    m15Ema:x.mtfBreakdown.m15Ema,
+                    m15Rsi:x.mtfBreakdown.m15Rsi
+                  }
+                : null
           }
         : {
             direction:null,
             status:"WAITING",
             score:latestMtfScore,
-            maxScore:6
+            maxScore:6,
+
+            mtfBreakdown:
+              latestMtfBreakdown
+                ? {
+                    h1Ema:latestMtfBreakdown.h1Ema,
+                    h1Rsi:latestMtfBreakdown.h1Rsi,
+                    m15Ema:latestMtfBreakdown.m15Ema,
+                    m15Rsi:latestMtfBreakdown.m15Rsi
+                  }
+                : null
           },
 
     tradeLevels:
@@ -1135,6 +1200,7 @@ async function p78Scan(){
         ? {
             candleStrength:x.strength,
             mtfScore:x.score,
+            mtfBreakdown:x.mtfBreakdown,
             retestHeld:x.retest,
             trendline:x.signal,
             continuation:"NOT USED"
