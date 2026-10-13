@@ -1103,7 +1103,20 @@ app.get("/liquid-api-test", async (req, res) => {
       }
     );
 
-    const data = await response.json().catch(() => ({}));
+    const rawBody = await response.text();
+
+let data = {};
+try {
+  data = JSON.parse(rawBody);
+} catch {
+  data = {};
+}
+
+console.log("Liquid API login diagnostic:", {
+  httpStatus: response.status,
+  contentType: response.headers.get("content-type"),
+  responseBody: rawBody.slice(0, 500)
+});
 
     const tokenReceived = Boolean(
       data?.token ||
