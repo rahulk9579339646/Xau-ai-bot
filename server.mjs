@@ -614,4 +614,529 @@ async function sendTelegram(message) {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body
+        body: JSON.stringify({
+          chat_id: TELEGRAM_CHAT_ID,
+          text: String(message)
+        })
+      }
+    );
+
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.description || "Telegram failed");
+    return { sent: true };
+  } catch (e) {
+    return { sent: false, error: e.message };
+  }
+}
+
+async function scanAndAlert() {
+  try {
+    const x = await p78Scan();
+    lastScan = x;
+    lastError = null;
+
+    if (x.executable) {
+      const l = x.tradeLevels || {};
+      const key = [
+        x.signal.direction,
+        l.entry,
+        l.stopLoss,
+        l.takeProfit,
+        x.signal.signalTime
+      ].join("|");
+
+      if (key !== lastSignalKey) {
+        lastTelegram = {
+          ...(await sendTelegram(telegramText(x))),
+          attemptedAt: new Date().toISOString(),
+          signalKey: key
+        };
+
+        if (lastTelegram.sent) lastSignalKey = key;
+      }
+    }
+
+    return x;
+  } catch (e) {
+    lastError = e.message;
+    return { success: false, strategy: "P78", status: "ERROR", error: e.message };
+  }
+}
+
+function auth(req, res, next) {
+  if (
+    HF_SECRET &&
+    String(req.headers["x-hf-secret"] || "") !== HF_SECRET
+  ) {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+
+  next();
+}
+
+/* =========================================================
+STRATEGY #5 — SUPPORT / RESISTANCE REJECTION
+Original rules preserved.
+========================================================= */
+
+function strategy5AtrSma(candles, period = 14) {
+  const tr = candles.map((c, i) =>
+    i === 0
+      ? c.high - c.low
+      : Math.max(
+          c.high - c.low,
+          Math.abs(c.high - candles[i - 1].close),
+          Math.abs(c.low - candles[i - 1].close)
+        )
+  );
+
+  return candles.map((_, i) => {
+    if (i < period - 1) return null;
+    const slice = tr.slice(i - period + 1, i + 1);
+    return slice.reduce((a, b) => a + b, 0) / period;
+  });
+}
+
+function strategy5ScanCandles(candles) {
+  const n = candles.length;
+  const atr = strategy5AtrSma(candles, 14);
+
+  let support = null;
+  let resistance = null;
+  let supportTested = false;
+  let resistanceTested = false;
+  let latestSignal = null;
+
+  const left = 3;
+  const right = 3;
+  const toleranceAtr = 0.25;
+
+  for (let k = 0; k < n; k++) {
+    const pivot = k - right;
+
+    if (pivot >= left && pivot + right < n) {
+      const ph = candles[pivot].high;
+      const pl = candles[pivot].low;
+      let isHigh = true;
+      let isLow = true;
+
+      for (let j = pivot - left; j < pivot; j++) {
+        if (!(ph > candles[j].high)) isHigh = false;
+        if (!(pl < candles[j].low)) isLow = false;
+      }
+
+      for (let j = pivot + 1; j <= pivot + right; j++) {
+        if (!(ph >= candles[j].high)) isHigh = false;
+        if (!(pl <= candles[j].low)) isLow = false;
+      }
+
+      if (isHigh) {
+        resistance = ph;
+        resistanceTested = false;
+      }
+
+      if (isLow) {
+        support = pl;
+        supportTested = false;
+      }
+    }
+
+    if (k < 14 || !Number.isFinite(atr[k]) || atr[k] <= 0) continue;
+
+    const c = candles[k];
+    const tol = atr[k] * toleranceAtr;
+
+    if (
+      support !== null &&
+      !supportTested &&
+      c.low <= support + tol &&
+      c.close > support &&
+      c.close > c.open
+    ) {
+      const entry = c.close;
+      let sl = c.low;
+
+      if (entry - sl < atr[k]) sl = entry - atr[k];
+
+      const risk = entry - sl;
+
+      latestSignal = {
+        index: k,
+        time: c.time,
+        direction: "BUY",
+        entry,
+        stopLoss: sl,
+        takeProfit: entry + risk * 2,
+        support,
+        resistance,
+        rejection: "SUPPORT BULLISH REJECTION",
+        atr: atr[k],
+        risk
+      };
+
+      supportTested = true;
+    } else if (
+      resistance !== null &&
+      !resistanceTested &&
+      c.high >= resistance - tol &&
+      c.close < resistance &&
+      c.close < c.open
+    ) {
+      const entry = c.close;
+      let sl = c.high;
+
+      if (sl - entry < atr[k]) sl = entry + atr[k];
+
+      const risk = sl - entry;
+
+      latestSignal = {
+        index: k,
+        time: c.time,
+        direction: "SELL",
+        entry,
+        stopLoss: sl,
+        takeProfit: entry - risk * 2,
+        support,
+        resistance,
+        rejection: "RESISTANCE BEARISH REJECTION",
+        atr: atr[k],
+        risk
+      };
+
+      resistanceTested = true;
+    }
+  }
+
+  const lastIndex = n - 1;
+  const currentAtr = lastIndex >= 0 ? atr[lastIndex] : null;
+  const active =
+    latestSignal && latestSignal.index === lastIndex
+      ? latestSignal
+      : null;
+
+  return {
+    success: true,
+    strategy: "STRATEGY_5",
+    strategyName: "XAUUSD Strategy #5 — Support / Resistance Rejection",
+    instrument: OUTPUT_SYMBOL,
+    executionTimeframe: "5M",
+    generatedAt: new Date().toISOString(),
+    currentPrice: last(candles)?.close ?? null,
+    status: active ? "CONFIRMED" : "WAITING",
+    executable: !!active,
+    signal: active
+      ? {
+          direction: active.direction,
+          status: active.rejection,
+          signalTime: active.time
+        }
+      : { direction: null, status: "WAITING", signalTime: null },
+    tradeLevels: active
+      ? {
+          entry: round(active.entry),
+          stopLoss: round(active.stopLoss),
+          takeProfit: round(active.takeProfit),
+          risk: round(active.risk),
+          rr: "1:2"
+        }
+      : null,
+    components: {
+      support: support === null ? null : round(support),
+      resistance: resistance === null ? null : round(resistance),
+      rejection: active ? active.rejection : "NONE",
+      direction: active ? active.direction : "-",
+      atr: round(currentAtr),
+      swingLeft: left,
+      swingRight: right,
+      toleranceATR: toleranceAtr,
+      tested: {
+        support: supportTested,
+        resistance: resistanceTested
+      }
+    },
+    note: "Strategy #5 only: 3/3 swing levels, rejection candle, ATR(14) SMA, 0.25 ATR tolerance, minimum 1 ATR SL, TP 2R. No P78 conditions."
+  };
+}
+
+async function strategy5Scan() {
+  const candles = await getCandles(TF["5M"], 5000);
+
+  if (!candles || candles.length < 30) {
+    throw new Error("Strategy #5: insufficient XAUUSD 5M candles");
+  }
+
+  return strategy5ScanCandles(candles);
+}
+
+app.get("/strategy5/decision", auth, async (req, res) => {
+  try {
+    const x = await strategy5Scan();
+
+    res.status(200).json({
+      ...x,
+      liquidAutoTrade: LIQUID_AUTO_TRADE,
+      executionAllowed: LIQUID_AUTO_TRADE && !!x.executable
+    });
+  } catch (e) {
+    lastError = e.message;
+
+    res.status(500).json({
+      success: false,
+      strategy: "STRATEGY_5",
+      status: "ERROR",
+      error: e.message
+    });
+  }
+});
+
+app.get("/strategy5/status", (req, res) => {
+  res.json({
+    success: true,
+    strategy: "STRATEGY_5",
+    status: "RUNNING",
+    lastError
+  });
+});
+
+app.get("/p78/decision", auth, async (req, res) => {
+  const x = await scanAndAlert();
+
+  res.status(x.success === false ? 500 : 200).json({
+    ...x,
+    liquidAutoTrade: LIQUID_AUTO_TRADE,
+    executionAllowed: LIQUID_AUTO_TRADE && !!x.executable
+  });
+});
+
+app.get("/signal", auth, async (req, res) => {
+  const x = await scanAndAlert();
+
+  res.status(x.success === false ? 500 : 200).json({
+    ...x,
+    liquidAutoTrade: LIQUID_AUTO_TRADE,
+    executionAllowed: LIQUID_AUTO_TRADE && !!x.executable
+  });
+});
+
+app.get("/p78/status", (req, res) => {
+  res.json({
+    success: true,
+    strategy: "P78",
+    status: "RUNNING",
+    liquidAutoTrade: LIQUID_AUTO_TRADE,
+    telegramEnabled,
+    telegramConfigured: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
+    lastScanAt: lastScan?.generatedAt || null,
+    lastSignalKey,
+    lastTelegram,
+    lastError,
+    backtest: {
+      trades: 354,
+      wins: 277,
+      losses: 77,
+      winRate: 78.25,
+      netR: 255.40
+    }
+  });
+});
+
+app.get("/status", (req, res) => {
+  res.json({
+    success: true,
+    instrument: OUTPUT_SYMBOL,
+    strategy: "P78",
+    liquidAutoTrade: LIQUID_AUTO_TRADE,
+    lastScan,
+    lastError
+  });
+});
+
+app.post("/p78/telegram", (req, res) => {
+  telegramEnabled = !!req.body?.enabled;
+  res.json({ success: true, telegramEnabled });
+});
+
+app.get("/health", (req, res) => {
+  res.json({ success: true, instrument: OUTPUT_SYMBOL, strategy: "P78" });
+});
+
+/* TELEGRAM COMMANDS */
+
+let telegramUpdateOffset = 0;
+let telegramCommandPolling = false;
+
+async function sendTelegramCommandReply(message) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+
+  try {
+    const r = await fetch(
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: TELEGRAM_CHAT_ID,
+          text: String(message)
+        })
+      }
+    );
+
+    const j = await r.json();
+
+    if (!r.ok || !j.ok) {
+      console.error(
+        "Telegram command reply failed:",
+        j.description || "Telegram error"
+      );
+    }
+  } catch (e) {
+    console.error("Telegram command reply error:", e.message);
+  }
+}
+
+async function pollTelegramCommands() {
+  if (
+    !TELEGRAM_BOT_TOKEN ||
+    !TELEGRAM_CHAT_ID ||
+    telegramCommandPolling
+  ) {
+    return;
+  }
+
+  telegramCommandPolling = true;
+
+  try {
+    const url =
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates` +
+      `?offset=${telegramUpdateOffset}&timeout=0`;
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!response.ok || !data.ok || !Array.isArray(data.result)) return;
+
+    for (const update of data.result) {
+      telegramUpdateOffset = Math.max(
+        telegramUpdateOffset,
+        Number(update.update_id || 0) + 1
+      );
+
+      const message = update.message;
+
+      if (!message?.text || !message.chat) continue;
+      if (String(message.chat.id) !== String(TELEGRAM_CHAT_ID)) continue;
+
+      const command = message.text
+        .trim()
+        .split(/\s+/)[0]
+        .split("@")[0]
+        .toLowerCase();
+
+      if (command === "/start_p78") {
+        telegramEnabled = true;
+        await sendTelegramCommandReply("✅ P78 Telegram signals are ON.");
+      } else if (command === "/stop_p78") {
+        telegramEnabled = false;
+        await sendTelegramCommandReply(
+          "⏸️ P78 Telegram signals are OFF. Scanning continues."
+        );
+      } else if (command === "/status_p78") {
+        await sendTelegramCommandReply(
+          `P78 Telegram signals: ${telegramEnabled ? "ON ✅" : "OFF ⏸️"}`
+        );
+      }
+    }
+  } catch (e) {
+    console.error("Telegram command polling error:", e.message);
+  } finally {
+    telegramCommandPolling = false;
+  }
+}
+
+/* =========================================================
+LIQUID CHARTS API LOGIN TEST
+This endpoint does not place trades or return the session token.
+========================================================= */
+
+let liquidApiTestLastRun = 0;
+
+app.get("/liquid-api-test", async (req, res) => {
+  const now = Date.now();
+
+  if (now - liquidApiTestLastRun < 30000) {
+    return res.status(429).json({
+      ok: false,
+      message: "Wait 30 seconds before testing again."
+    });
+  }
+
+  liquidApiTestLastRun = now;
+
+  const missing = [];
+
+  if (!LIQUID_API_USERNAME) missing.push("LIQUID_API_USERNAME");
+  if (!LIQUID_API_PASSWORD) missing.push("LIQUID_API_PASSWORD");
+  if (!LIQUID_API_DOMAIN) missing.push("LIQUID_API_DOMAIN");
+
+  if (missing.length) {
+    return res.status(400).json({
+      ok: false,
+      message: "Missing Render environment variables",
+      missing
+    });
+  }
+
+  try {
+    const response = await fetch(
+      "https://api.liquidcharts.com/dxsca-web/login",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          username: LIQUID_API_USERNAME,
+          domain: LIQUID_API_DOMAIN,
+          password: LIQUID_API_PASSWORD
+        }),
+        signal: AbortSignal.timeout(15000)
+      }
+    );
+
+    const data = await response.json().catch(() => ({}));
+
+    const tokenReceived = Boolean(
+      data?.token ||
+      data?.accessToken ||
+      data?.access_token
+    );
+
+    return res.status(200).json({
+      ok: response.ok && tokenReceived,
+      httpStatus: response.status,
+      tokenReceived,
+      message:
+        response.ok && tokenReceived
+          ? "A session token was returned. Login appears successful."
+          : "Login not confirmed. Check domain, credentials and API permissions.",
+      errorCode: data?.code ?? null
+    });
+  } catch {
+    return res.status(200).json({
+      ok: false,
+      message: "Could not reach the Liquid Charts API."
+    });
+  }
+});
+
+/* START BACKGROUND TASKS */
+
+pollTelegramCommands();
+setInterval(pollTelegramCommands, 3000);
+
+setTimeout(scanAndAlert, 20000);
+setInterval(scanAndAlert, 60000);
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`P78 XAUUSD server running on ${PORT}`);
+});
