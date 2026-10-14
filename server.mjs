@@ -389,7 +389,7 @@ async function strategy5Scan() {
 /* =========================================================
    ORDER BLOCK STRATEGY — independent of Strategy #5, P78 and Order Flow.
    Bullish/bearish displacement body >= 1 ATR and close beyond prior 10-bar
-   structure; last opposite candle is the OB; first return touch only.
+   structure; displacement candle defines the OB zone; first return touch only.
    ========================================================= */
 const OB_TIMEFRAMES = { "5M":"5min", "15M":"15min", "1H":"1h" };
 const OB_LOOKBACK = 100;
@@ -435,15 +435,11 @@ function obBuildZones(candles, timeframe) {
     const bullish = candle.close > candle.open && candle.close > priorHigh;
     const bearish = candle.close < candle.open && candle.close < priorLow;
     if (!bullish && !bearish) continue;
-    // Locate the most recent opposite-colour candle before displacement.
-    let obIndex = -1;
-    for (let j = i - 1; j >= Math.max(0, i - 10); j--) {
-      if ((bullish && c[j].close < c[j].open) || (bearish && c[j].close > c[j].open)) { obIndex = j; break; }
-    }
-    if (obIndex < 0) continue;
-    const ob = c[obIndex];
+    // User rule: no preceding opposite-colour candle is required.
+    // The confirmed displacement candle itself defines the OB touch zone.
+    const ob = candle;
     const zone = {
-      id: `OB|${timeframe}|${bullish ? "BUY" : "SELL"}|${ob.time}|${candle.time}`,
+      id: `OB|${timeframe}|${bullish ? "BUY" : "SELL"}|${ob.time}`,
       timeframe, direction:bullish ? "BUY" : "SELL", createdAt:ob.time,
       displacementTime:candle.time, displacementClose:candle.close,
       zoneHigh:ob.high, zoneLow:ob.low, atr:atr[i], body, touched:false
@@ -494,7 +490,7 @@ async function orderBlockScan(timeframe, equity) {
       status:sizing.valid ? "FIRST_TOUCH_CONFIRMED" : "SKIPPED_RISK_CAP",
       executable:sizing.valid, signalKey:z.id, zone:z,
       signal:{direction:z.direction, signalTime:current.time, displacementTime:z.displacementTime,
-        status:"First touch of confirmed Order Block"},
+        status:"First touch of displacement-candle Order Block zone"},
       tradeLevels:{entry:round(entry),stopLoss:round(stopLoss),takeProfit:null,risk:round(risk),rr:"trailing by equity milestones"},
       sizing, currentPrice:current.close,
       trailingRule:"At +1% equity profit SL moves to entry; each additional +1% milestone locks the previous +1% milestone. Continues above +3%; no fixed +3% close.",
@@ -515,7 +511,7 @@ async function orderBlockScan(timeframe, equity) {
     success:true, strategy:"ORDER_BLOCK", timeframe:tf, status:"WAITING", executable:false,
     currentPrice:current.close, activeTrade:null,
     zones:zones.map(z=>({...z,used:state.usedZoneIds.has(z.id)})),
-    note:"Waiting for the first return touch of a confirmed OB zone. Provide live equity as ?equity=...", generatedAt:new Date().toISOString()
+    note:"Waiting for the first return touch of the displacement-candle OB zone. Provide live equity as ?equity=...", generatedAt:new Date().toISOString()
   };
 }
 function obManagePosition(timeframe, currentPrice, equity) {
@@ -1107,7 +1103,7 @@ function orderBlockTelegramText(x) {
     `Direction: ${s.direction||"WAIT"}`,`Entry: ${l.entry??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,
     `Zone: ${z.zoneLow??"N/A"} - ${z.zoneHigh??"N/A"}`,`Lots: ${q.lots??"N/A"}`,
     `Estimated risk: ${q.estimatedRisk??"N/A"} (${q.riskPercent??"N/A"}% equity)`,
-    "First touch only | Displacement body >= 1 ATR | close breaks prior 10-candle structure",
+    "First touch only | displacement candle defines OB zone | body >= 1 ATR | close breaks prior 10-candle structure",
     "Trail: +1% equity => SL entry; +2% => lock +1%; +3% => lock +2%; continues beyond +3%.",
     "Broker order/SL modification requires Liquid Chart execution bridge.","━━━━━━━━━━━━━━━━━━━━"].join("\n");
 }
