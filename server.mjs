@@ -3,7 +3,8 @@
    SECTION 1: Strategy #5 — Support/Resistance Rejection
    SECTION 2: P78 — exact existing conditions retained
    SECTION 3: Order Flow — original wick/delta/absorption conditions retained
-   SECTION 4+: independent Telegram switches + separate lot compounding
+   SECTION 4: Order Block — independent 5M / 15M / 1H engine
+   SECTION 5+: independent Telegram switches + separate lot compounding
 
    Required packages: express, ws
    Required Render env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
@@ -16,6 +17,7 @@
 
 import express from "express";
 import WebSocket from "ws";
+import fs from "node:fs";
 
 const app = express();
 app.use(express.json());
@@ -39,7 +41,32 @@ const TF={"1H":"1h","15M":"15min","5M":"5min"};
 const CACHE=new Map();
 const CACHE_MS=15000;
 let lastScan=null,lastSignalKey=null,lastTelegram=null,lastError=null;
-const telegramEnabledByStrategy = { strategy5: true, p78: true, orderflow: true };
+// P78 execution deduplication is server-side, so Liquid OFF/ON or script reloads
+// cannot make the same confirmed candle signal executable again.
+const P78_STATE_FILE=process.env.P78_STATE_FILE||""; // set to a Render persistent-disk path to survive service restarts
+const p78ConsumedSignalKeys=new Set();
+let p78StatePersisted=false;
+function loadP78ConsumedKeys(){
+  if(!P78_STATE_FILE)return;
+  try{
+    if(fs.existsSync(P78_STATE_FILE)){
+      const saved=JSON.parse(fs.readFileSync(P78_STATE_FILE,"utf8"));
+      if(Array.isArray(saved.consumedKeys)){
+        for(const key of saved.consumedKeys.slice(-2000))p78ConsumedSignalKeys.add(String(key));
+      }
+    }
+    p78StatePersisted=true;
+  }catch(e){console.error("P78 state load error:",e.message);}
+}
+function saveP78ConsumedKeys(){
+  if(!P78_STATE_FILE)return false;
+  try{
+    fs.writeFileSync(P78_STATE_FILE,JSON.stringify({consumedKeys:Array.from(p78ConsumedSignalKeys).slice(-2000)}),"utf8");
+    p78StatePersisted=true;return true;
+  }catch(e){p78StatePersisted=false;console.error("P78 state save error:",e.message);return false;}
+}
+loadP78ConsumedKeys();
+const telegramEnabledByStrategy = { strategy5: true, p78: true, orderflow: true, orderblock: true };
 
 function num(v,d=null){const n=Number(v);return Number.isFinite(n)?n:d;}
 function round(v,d=5){return Number.isFinite(v)?Math.round(v*10**d)/10**d:null;}
@@ -175,29 +202,66 @@ function retestHeld(c,k,direction,breakout,atr){
   return{touched:false,held:false,index:null,price:null};
 }
 
-/* P78 = ONLY these 3 conditions. Future 25-candle continuation is NOT used. */
+/* P78 = ONLY these 3 conditions. Future 25-candle continuation is NOT used.
+   Execution is allowed only on the candle where the first retest is confirmed.
+   Old historical candidates are never returned as fresh executable signals. */
 async function p78Scan(){
   const [raw1,raw15,raw5]=await Promise.all([getCandles(TF["1H"],5000),getCandles(TF["15M"],5000),getCandles(TF["5M"],5000)]);
   const c1=addIndicators(raw1),c15=addIndicators(raw15),c5=addIndicators(raw5),atr=c5.map(x=>x.ATR14);
   const raw=rawTrendlineSignals(c5);
+  const latestIndex=c5.length-1;
+  const current=last(c5)?.close??null;
   const candidates=[];
   for(const s of raw){
-    const k=s.idx;if(k>=c5.length-1)continue;
+    const k=s.idx;
+    // Breakout must precede the latest candle; retest confirmation must happen now.
+    if(k>=latestIndex)continue;
     const cs=candleStrength(c5,k,s.Direction,atr);if(cs.strength==="Weak")continue;
     const mtf=mtfScore(c1,c15,s.Time,s.Direction);if(mtf.score<5)continue;
-    const rt=retestHeld(c5,k,s.Direction,s.Price,atr);if(!rt.held)continue;
-    const risk=atr[k]*0.50,entry=s.Price;
+    const rt=retestHeld(c5,k,s.Direction,s.Price,atr);
+    if(!rt.held||rt.index!==latestIndex)continue;
+    const entry=rt.price;
+    const risk=atr[k]*0.50;
+    if(!Number.isFinite(entry)||!Number.isFinite(risk)||risk<=0)continue;
     const sl=s.Direction==="BUY"?entry-risk:entry+risk;
-    const tp=s.Direction==="BUY"?entry+risk*2.50:entry-risk*2.50;
+    const tp=s.Direction==="BUY"?entry+risk*2:entry-risk*2;
     candidates.push({signal:s,k,entry,sl,tp,risk,score:mtf.score,mtfBreakdown:mtf.mtfBreakdown,strength:cs,retest:rt,trendlineSource:"EXACT P78 BACKTEST ENGINE"});
   }
-  candidates.sort((a,b)=>b.k-a.k);const x=candidates[0]||null;const current=last(c5)?.close??null;if(x){x.entry=current;x.sl=x.signal.Direction==="BUY"?current-x.risk:current+x.risk;x.tp=x.signal.Direction==="BUY"?current+x.risk*2.50:current-x.risk*2.50;}
-  return{success:true,strategy:"P78",strategyName:"XAUUSD P78 — Exact Backtested Strategy",instrument:OUTPUT_SYMBOL,executionTimeframe:"5M",contextTimeframes:["1H","15M"],generatedAt:new Date().toISOString(),currentPrice:current,status:x?"CONFIRMED":"WAITING",executable:!!x,signal:x?{direction:x.signal.Direction,status:"P78 CONFIRMED",score:x.score,maxScore:6,signalIndex:x.k,signalTime:x.signal.Time,candleStrength:x.strength.strength}: {direction:null,status:"WAITING",score:0,maxScore:6},mtfBreakdown:x?.mtfBreakdown||null,tradeLevels:x?{entry:round(x.entry),stopLoss:round(x.sl),takeProfit:round(x.tp),risk:round(x.risk),rr:"1:2.50"}:null,components:x?{candleStrength:x.strength,mtfScore:x.score,mtfBreakdown:x.mtfBreakdown,retestHeld:x.retest,trendline:x.signal,continuation:"NOT USED"}:null,backtest:{trades:354,wins:277,losses:77,winRate:78.25,netR:255.40},note:"P78 = CandleStrength != Weak + MTF_Score >= 5 + RetestHeld. Future 25-candle Continuation condition is NOT USED."};
+  candidates.sort((a,b)=>b.k-a.k);
+  const x=candidates[0]||null;
+  const confirmationTime=x?c5[x.retest.index].time:null;
+  const signalKey=x?[OUTPUT_SYMBOL,"P78",x.signal.Direction,confirmationTime].join("|"):null;
+  const consumed=!!signalKey&&p78ConsumedSignalKeys.has(signalKey);
+  return{
+    success:true,strategy:"P78",strategyName:"XAUUSD P78 — Exact Backtested Strategy",instrument:OUTPUT_SYMBOL,
+    executionTimeframe:"5M",contextTimeframes:["1H","15M"],generatedAt:new Date().toISOString(),currentPrice:current,
+    status:x?(consumed?"ALREADY CONSUMED":"CONFIRMED"):"WAITING",
+    executable:!!x&&!consumed,signalKey,signalConsumed:consumed,
+    signal:x?{direction:x.signal.Direction,status:consumed?"P78 SIGNAL ALREADY USED":"P78 CONFIRMED",score:x.score,maxScore:6,
+      signalIndex:x.retest.index,signalTime:confirmationTime,breakoutTime:x.signal.Time,candleStrength:x.strength.strength}:
+      {direction:null,status:"WAITING",score:0,maxScore:6,signalTime:null},
+    mtfBreakdown:x?.mtfBreakdown||null,
+    tradeLevels:x?{entry:round(x.entry),stopLoss:round(x.sl),takeProfit:round(x.tp),risk:round(x.risk),rr:"1:2"}:null,
+    components:x?{candleStrength:x.strength,mtfScore:x.score,mtfBreakdown:x.mtfBreakdown,
+      retestHeld:{...x.retest,time:confirmationTime},trendline:x.signal,continuation:"NOT USED"}:null,
+    backtest:{trades:354,wins:277,losses:77,winRate:78.25,netR:255.40},
+    note:"P78 = CandleStrength != Weak + MTF_Score >= 5 + RetestHeld. Future 25-candle Continuation condition is NOT USED. Only the latest retest-confirmation candle is executable; RR 1:2."
+  };
 }
 
-function telegramText(x){const s=x.signal||{},l=x.tradeLevels||{};return ["━━━━━━━━━━━━━━━━━━━━","🚨 XAUUSD P78 SIGNAL","━━━━━━━━━━━━━━━━━━━━",`Direction: ${s.direction||"WAIT"}`,`Status: ${s.status||"WAITING"}`,`MTF Score: ${s.score??0}/6`,`Current: ${x.currentPrice??"N/A"}`,"","TRADE LEVELS",`Entry: ${l.entry??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,`TP: ${l.takeProfit??"N/A"}`,"","Conditions","• CandleStrength != Weak","• MTF Score >= 5","• RetestHeld = TRUE","• Future 25-candle Continuation = NOT USED","","Backtest: 354 trades | 277W | 77L | 78.25% | +255.40R","━━━━━━━━━━━━━━━━━━━━"].join("\n");}
+function telegramText(x){const s=x.signal||{},l=x.tradeLevels||{};return ["━━━━━━━━━━━━━━━━━━━━","🚨 XAUUSD P78 SIGNAL","━━━━━━━━━━━━━━━━━━━━",`Direction: ${s.direction||"WAIT"}`,`Status: ${s.status||"WAITING"}`,`MTF Score: ${s.score??0}/6`,`Current: ${x.currentPrice??"N/A"}`,"","TRADE LEVELS",`Entry: ${l.entry??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,`TP: ${l.takeProfit??"N/A"}`,"","Risk/Reward: 1:2","","Conditions","• CandleStrength != Weak","• MTF Score >= 5","• RetestHeld = TRUE","• Future 25-candle Continuation = NOT USED","","Backtest: 354 trades | 277W | 77L | 78.25% | +255.40R","━━━━━━━━━━━━━━━━━━━━"].join("\n");}
 async function sendTelegram(strategy,message){if(!telegramEnabledByStrategy[strategy]||!TELEGRAM_BOT_TOKEN||!TELEGRAM_CHAT_ID)return{sent:false,reason:"Telegram disabled/not configured for "+strategy};try{const r=await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:TELEGRAM_CHAT_ID,text:String(message)})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.description||"Telegram failed");return{sent:true};}catch(e){return{sent:false,error:e.message};}}
-async function scanAndAlert(){try{const x=await p78Scan();lastScan=x;lastError=null;if(x.executable){const l=x.tradeLevels||{},key=[x.signal.direction,l.entry,l.stopLoss,l.takeProfit,x.signal.signalTime].join("|");if(key!==lastSignalKey){lastTelegram={...(await sendTelegram("p78",telegramText(x))),attemptedAt:new Date().toISOString(),signalKey:key};if(lastTelegram.sent)lastSignalKey=key;}}return x;}catch(e){lastError=e.message;return{success:false,strategy:"P78",status:"ERROR",error:e.message};}}
+async function scanAndAlert(){
+  try{
+    const x=await p78Scan();lastScan=x;lastError=null;
+    if(x.executable&&x.signalKey&&x.signalKey!==lastSignalKey){
+      // Claim the alert key before awaiting Telegram to prevent overlapping scans.
+      lastSignalKey=x.signalKey;
+      lastTelegram={...(await sendTelegram("p78",telegramText(x))),attemptedAt:new Date().toISOString(),signalKey:x.signalKey};
+    }
+    return x;
+  }catch(e){lastError=e.message;return{success:false,strategy:"P78",status:"ERROR",error:e.message};}
+}
 function auth(req,res,next){if(HF_SECRET&&String(req.headers["x-hf-secret"]||"")!==HF_SECRET)return res.status(401).json({success:false,error:"Unauthorized"});next();}
 
 
@@ -322,6 +386,173 @@ async function strategy5Scan() {
   return strategy5ScanCandles(candles);
 }
 
+/* =========================================================
+   ORDER BLOCK STRATEGY — independent of Strategy #5, P78 and Order Flow.
+   Bullish/bearish displacement body >= 1 ATR and close beyond prior 10-bar
+   structure; last opposite candle is the OB; first return touch only.
+   ========================================================= */
+const OB_TIMEFRAMES = { "5M":"5min", "15M":"15min", "1H":"1h" };
+const OB_LOOKBACK = 100;
+const OB_MAX_ZONES = 10;
+const OB_ATR_MULTIPLE = 1.0;
+const OB_CONTRACT_SIZE = Math.max(1, Number(process.env.ORDERBLOCK_CONTRACT_SIZE || 100));
+const OB_LOT_STEP = Math.max(0.001, Number(process.env.ORDERBLOCK_LOT_STEP || process.env.LOT_STEP || 0.01));
+const OB_MIN_LOT = Math.max(OB_LOT_STEP, Number(process.env.ORDERBLOCK_MIN_LOT || 0.01));
+const OB_MAX_LOT = Math.max(OB_MIN_LOT, Number(process.env.ORDERBLOCK_MAX_LOT || process.env.LOT_MAX || 10));
+const OB_SL_BUFFER = Math.max(0, Number(process.env.ORDERBLOCK_SL_BUFFER || 0.10));
+const orderBlockState = Object.fromEntries(Object.keys(OB_TIMEFRAMES).map(tf => [tf, {
+  zones: [], usedZoneIds: new Set(), activeTrade: null, lastSignalKey: null,
+  lastScanAt: null, lastError: null, lastAlert: null
+}]));
+function obRoundLot(lot) {
+  const steps = Math.floor((lot + 1e-10) / OB_LOT_STEP);
+  return Number((steps * OB_LOT_STEP).toFixed(6));
+}
+function obRiskSizing(equity, entry, stopLoss) {
+  if (!Number.isFinite(equity) || equity <= 0) return { valid:false, reason:"A positive live equity query/body value is required.", lots:0 };
+  const riskPerLot = Math.abs(entry - stopLoss) * OB_CONTRACT_SIZE;
+  if (!(riskPerLot > 0)) return { valid:false, reason:"Invalid stop-loss distance.", lots:0 };
+  const riskCap = equity * 0.01;
+  const rawLots = riskCap / riskPerLot;
+  const lots = Math.min(OB_MAX_LOT, obRoundLot(rawLots));
+  if (lots < OB_MIN_LOT || lots * riskPerLot > riskCap + 1e-8) {
+    return { valid:false, reason:"Minimum lot would risk more than 1% of equity; trade skipped.", lots:0, riskCap:round(riskCap,2), riskPerLot:round(riskPerLot,4) };
+  }
+  return { valid:true, lots, riskCap:round(riskCap,2), estimatedRisk:round(lots*riskPerLot,2), riskPercent:round((lots*riskPerLot/equity)*100,4), riskPerLot:round(riskPerLot,4) };
+}
+function obBuildZones(candles, timeframe) {
+  const c = candles.slice(-OB_LOOKBACK), n = c.length;
+  if (n < 25) return [];
+  const atr = atrSeries(c, 14), zones = [];
+  // Only use already-closed candles before the latest candle as displacement candidates.
+  for (let i = 10; i < n - 1; i++) {
+    if (!Number.isFinite(atr[i]) || atr[i] <= 0) continue;
+    const candle = c[i], body = Math.abs(candle.close - candle.open);
+    if (body < atr[i] * OB_ATR_MULTIPLE) continue;
+    const prior = c.slice(Math.max(0, i - 10), i);
+    const priorHigh = Math.max(...prior.map(x => x.high));
+    const priorLow = Math.min(...prior.map(x => x.low));
+    const bullish = candle.close > candle.open && candle.close > priorHigh;
+    const bearish = candle.close < candle.open && candle.close < priorLow;
+    if (!bullish && !bearish) continue;
+    // Locate the most recent opposite-colour candle before displacement.
+    let obIndex = -1;
+    for (let j = i - 1; j >= Math.max(0, i - 10); j--) {
+      if ((bullish && c[j].close < c[j].open) || (bearish && c[j].close > c[j].open)) { obIndex = j; break; }
+    }
+    if (obIndex < 0) continue;
+    const ob = c[obIndex];
+    const zone = {
+      id: `OB|${timeframe}|${bullish ? "BUY" : "SELL"}|${ob.time}|${candle.time}`,
+      timeframe, direction:bullish ? "BUY" : "SELL", createdAt:ob.time,
+      displacementTime:candle.time, displacementClose:candle.close,
+      zoneHigh:ob.high, zoneLow:ob.low, atr:atr[i], body, touched:false
+    };
+    zones.push(zone);
+  }
+  const unique = new Map();
+  for (const z of zones) unique.set(z.id, z);
+  return Array.from(unique.values()).slice(-OB_MAX_ZONES).reverse();
+}
+async function orderBlockScan(timeframe, equity) {
+  const tf = String(timeframe || "5M").toUpperCase();
+  if (!OB_TIMEFRAMES[tf]) throw new Error("timeframe must be 5M, 15M, or 1H.");
+  const state = orderBlockState[tf];
+  const candles = await getCandles(OB_TIMEFRAMES[tf], 500);
+  if (!candles || candles.length < 30) throw new Error(`Order Block: insufficient ${tf} candles.`);
+  const zones = obBuildZones(candles, tf);
+  state.zones = zones;
+  state.lastScanAt = new Date().toISOString();
+  state.lastError = null;
+  const current = last(candles);
+  const active = state.activeTrade;
+  if (active) return {
+    success:true, strategy:"ORDER_BLOCK", timeframe:tf, status:"ACTIVE_TRADE",
+    executable:false, reason:"This timeframe already has its own active Order Block trade.",
+    currentPrice:current.close, activeTrade:active, zones:zones.map(z=>({...z,used:state.usedZoneIds.has(z.id)})), generatedAt:new Date().toISOString()
+  };
+  // The entry is the first candle after the OB/displacement sequence that overlaps the zone.
+  for (const z of zones) {
+    if (state.usedZoneIds.has(z.id)) continue;
+    const displacementIndex = candles.findIndex(x => x.time === z.displacementTime);
+    if (displacementIndex < 0 || displacementIndex >= candles.length - 1) continue;
+    // Enforce FIRST touch: if any completed candle after displacement already
+    // overlapped this zone, do not enter on a later retest.
+    let firstTouchIndex = -1;
+    for (let j = displacementIndex + 1; j < candles.length; j++) {
+      if (candles[j].low <= z.zoneHigh && candles[j].high >= z.zoneLow) { firstTouchIndex = j; break; }
+    }
+    if (firstTouchIndex !== candles.length - 1) continue;
+    const entry = current.close;
+    const stopLoss = z.direction === "BUY" ? z.zoneLow - OB_SL_BUFFER : z.zoneHigh + OB_SL_BUFFER;
+    if ((z.direction === "BUY" && stopLoss >= entry) || (z.direction === "SELL" && stopLoss <= entry)) continue;
+    const risk = Math.abs(entry - stopLoss);
+    const sizing = obRiskSizing(Number(equity), entry, stopLoss);
+    const candidate = {
+      success:true, strategy:"ORDER_BLOCK", strategyName:"XAUUSD Order Block First-Touch Retest",
+      instrument:OUTPUT_SYMBOL, timeframe:tf, generatedAt:new Date().toISOString(),
+      status:sizing.valid ? "FIRST_TOUCH_CONFIRMED" : "SKIPPED_RISK_CAP",
+      executable:sizing.valid, signalKey:z.id, zone:z,
+      signal:{direction:z.direction, signalTime:current.time, displacementTime:z.displacementTime,
+        status:"First touch of confirmed Order Block"},
+      tradeLevels:{entry:round(entry),stopLoss:round(stopLoss),takeProfit:null,risk:round(risk),rr:"trailing by equity milestones"},
+      sizing, currentPrice:current.close,
+      trailingRule:"At +1% equity profit SL moves to entry; each additional +1% milestone locks the previous +1% milestone. Continues above +3%; no fixed +3% close.",
+      note:"Server emits levels and trailing instructions only; broker SL changes require the Liquid Chart execution bridge."
+    };
+    if (!sizing.valid) return candidate;
+    state.usedZoneIds.add(z.id);
+    state.lastSignalKey = z.id;
+    state.activeTrade = {
+      tradeId:z.id, timeframe:tf, direction:z.direction, entry:round(entry), originalStopLoss:round(stopLoss),
+      stopLoss:round(stopLoss), lots:sizing.lots, equityAtEntry:Number(equity), zoneId:z.id,
+      openedAt:new Date().toISOString(), highestMilestone:0, status:"ACTIVE"
+    };
+    candidate.activeTrade = state.activeTrade;
+    return candidate;
+  }
+  return {
+    success:true, strategy:"ORDER_BLOCK", timeframe:tf, status:"WAITING", executable:false,
+    currentPrice:current.close, activeTrade:null,
+    zones:zones.map(z=>({...z,used:state.usedZoneIds.has(z.id)})),
+    note:"Waiting for the first return touch of a confirmed OB zone. Provide live equity as ?equity=...", generatedAt:new Date().toISOString()
+  };
+}
+function obManagePosition(timeframe, currentPrice, equity) {
+  const tf=String(timeframe||"").toUpperCase();
+  if(!OB_TIMEFRAMES[tf]) throw new Error("timeframe must be 5M, 15M, or 1H.");
+  const state=orderBlockState[tf], trade=state.activeTrade;
+  if(!trade) throw new Error(`No active Order Block trade for ${tf}.`);
+  const price=Number(currentPrice), liveEquity=Number(equity);
+  if(!Number.isFinite(price)||price<=0||!Number.isFinite(liveEquity)||liveEquity<=0) throw new Error("currentPrice and positive live equity are required.");
+  const priceMove=(trade.direction==="BUY"?price-trade.entry:trade.entry-price);
+  const profit=priceMove*trade.lots*OB_CONTRACT_SIZE;
+  const profitPct=profit/Number(trade.equityAtEntry||liveEquity)*100;
+  const reached=Math.max(0,Math.floor(profitPct+1e-9));
+  if(reached>=1 && reached>trade.highestMilestone){
+    trade.highestMilestone=reached;
+    const lockedPct=Math.max(0,reached-1);
+    const lockedPriceDistance=(liveEquity*(lockedPct/100))/(trade.lots*OB_CONTRACT_SIZE);
+    const proposed=trade.direction==="BUY"?trade.entry+lockedPriceDistance:trade.entry-lockedPriceDistance;
+    // Never loosen an existing stop.
+    trade.stopLoss=trade.direction==="BUY"?Math.max(Number(trade.stopLoss),proposed):Math.min(Number(trade.stopLoss),proposed);
+    trade.lastTrailAt=new Date().toISOString();
+  }
+  return {success:true,strategy:"ORDER_BLOCK",timeframe:tf,tradeId:trade.tradeId,direction:trade.direction,
+    entry:trade.entry,currentPrice:price,lots:trade.lots,liveEquity:round(liveEquity,2),unrealizedProfit:round(profit,2),
+    profitPercentOfEquity:round(profitPct,4),highestMilestone:trade.highestMilestone,stopLoss:round(Number(trade.stopLoss)),
+    brokerStopLossUpdated:false,actionRequired:"Execution bridge must apply returned stopLoss to broker position."};
+}
+async function scanOrderBlockAndAlert() {
+  for (const tf of Object.keys(OB_TIMEFRAMES)) {
+    try {
+      const state=orderBlockState[tf];
+      // Periodic scan finds zones; a trade is not opened without a supplied live equity.
+      const candles=await getCandles(OB_TIMEFRAMES[tf],500);
+      state.zones=obBuildZones(candles,tf); state.lastScanAt=new Date().toISOString(); state.lastError=null;
+    } catch(e) { orderBlockState[tf].lastError=e.message; }
+  }
+}
 
 
 /* =========================================================
@@ -339,7 +570,8 @@ const LOT_MAX = Math.max(LOT_MIN, Number(process.env.LOT_MAX || 10));
 const lotBook = {
   strategy5: { base: Math.max(LOT_MIN, Number(process.env.STRATEGY5_BASE_LOT || 0.01)), current: null, wins: 0, losses: 0, lastResult: null, updatedAt: null },
   p78:      { base: Math.max(LOT_MIN, Number(process.env.P78_BASE_LOT || 0.01)), current: null, wins: 0, losses: 0, lastResult: null, updatedAt: null },
-  orderflow: { base: Math.max(LOT_MIN, Number(process.env.ORDERFLOW_BASE_LOT || 0.05)), current: null, wins: 0, losses: 0, lastResult: null, updatedAt: null }
+  orderflow: { base: Math.max(LOT_MIN, Number(process.env.ORDERFLOW_BASE_LOT || 0.05)), current: null, wins: 0, losses: 0, lastResult: null, updatedAt: null },
+  orderblock: { base: Math.max(LOT_MIN, Number(process.env.ORDERBLOCK_BASE_LOT || 0.01)), current: null, wins: 0, losses: 0, lastResult: null, updatedAt: null }
 };
 for (const book of Object.values(lotBook)) book.current = book.base;
 
@@ -352,7 +584,7 @@ function getDynamicLot(strategy) {
 }
 function applyTradeResult(strategy, result, pnl = null) {
   const book = lotBook[strategy];
-  if (!book) throw new Error("Unknown strategy. Use strategy5, p78, or orderflow.");
+  if (!book) throw new Error("Unknown strategy. Use strategy5, p78, orderflow, or orderblock.");
   const normalized = String(result || "").trim().toUpperCase();
   if (!["WIN", "LOSS"].includes(normalized)) throw new Error("result must be WIN or LOSS.");
   if (normalized === "WIN") {
@@ -379,642 +611,345 @@ function resultAuth(req) {
 }
 
 /* =========================================================
-   SECTION 3 — ORDER FLOW STRATEGY
-   CLOSED M1 + CLOSED M5 CONFIRMATION
-   RR 1:2 | Existing delta/wick/absorption rules retained
+   SECTION 3 — ORDER FLOW STRATEGY (isolated state)
+   Original delta / wick / absorption signal rules preserved.
    ========================================================= */
-
 const orderFlow = (() => {
-  const SYMBOL = "XAUUSDT";
-  const BINANCE_WS_URL = "wss://fstream.binance.com/ws/xauusdt@aggTrade";
+const SYMBOL = "XAUUSDT";
+const BINANCE_WS_URL = "wss://fstream.binance.com/market/ws/xauusdt@aggTrade";
 
-  const DRY_RUN = String(process.env.DRY_RUN ?? "true").toLowerCase() === "true";
-  const EXECUTION_SECRET = process.env.EXECUTION_SECRET || "";
-  const SL_BUFFER_MODE = String(process.env.SL_BUFFER_MODE || "fixed").toLowerCase();
-  const SL_BUFFER = Number(process.env.SL_BUFFER || 0.20);
-  const ATR_BUFFER_MULTIPLIER = Number(process.env.ATR_BUFFER_MULTIPLIER || 0.10);
-  const TP_RR = 2.0;
-  const MIN_DELTA_PERCENT = Number(process.env.MIN_DELTA_PERCENT || 20);
-  const ABSORPTION_RATIO = Number(process.env.ABSORPTION_RATIO || 1.20);
-  const MIN_M1_TOTAL_VOLUME = Number(process.env.MIN_M1_TOTAL_VOLUME ?? 0.05);
+// Execution hand-off configuration.
+// The server never places a broker order by itself. It exposes a deterministic
+// signal endpoint for Liquid Chart / an execution bridge to consume.
+const DRY_RUN = String(process.env.DRY_RUN ?? "true").toLowerCase() === "true";
+const EXECUTION_SECRET = process.env.EXECUTION_SECRET || "";
+const LOTS = Number(process.env.LOTS || 0.05); // fallback only; live output uses independent compounding.
+const SL_BUFFER = Number(process.env.SL_BUFFER || 0.20);
+const TP_RR = Number(process.env.TP_RR || 1.25);
+const MIN_DELTA_PERCENT = Number(process.env.MIN_DELTA_PERCENT || 20);
+const ABSORPTION_RATIO = Number(process.env.ABSORPTION_RATIO || 1.20);
 
-  let binanceWs = null;
-  let reconnectTimer = null;
-  let reconnectCount = 0;
-  let lastLoggedSignalKey = "";
 
-  const state = {
-    service: "XAU Footprint Order Flow Engine",
-    instrument: SYMBOL,
-    dataSource: "Binance Futures public aggTrade stream",
-    dataType: "Closed M1 entry + closed M5 confirmation",
-    websocketConnected: false,
-    ticks: 0,
-    lastTradeAt: null,
-    lastPrice: null,
-    lastQuantity: null,
-    lastSide: null,
-    totalBuyVolume: 0,
-    totalSellVolume: 0,
-    totalDelta: 0,
-    currentCandle: {
-      minute: null,
-      open: null,
-      high: null,
-      low: null,
-      close: null,
-      buyVolume: 0,
-      sellVolume: 0,
-      delta: 0,
-      trades: 0
-    },
-    closedM1: null,
-    closedM1PriceLevels: [],
-    closedM1History: [],
-    currentM5: null,
-    closedM5: null,
-    priceLevels: new Map(),
-    recentTrades: [],
-    lastSignal: null,
-    lastError: null
+let binanceWs = null;
+let reconnectTimer = null;
+let reconnectCount = 0;
+
+const state = {
+  service: "XAU Footprint Order Flow Engine",
+  instrument: SYMBOL,
+  dataSource: "Binance Futures public aggTrade stream",
+  dataType: "Live exchange trade stream",
+  websocketConnected: false,
+  ticks: 0,
+  lastTradeAt: null,
+  lastPrice: null,
+  lastQuantity: null,
+  lastSide: null,
+  totalBuyVolume: 0,
+  totalSellVolume: 0,
+  totalDelta: 0,
+  currentCandle: {
+    minute: null,
+    open: null,
+    high: null,
+    low: null,
+    close: null,
+    buyVolume: 0,
+    sellVolume: 0,
+    delta: 0,
+    trades: 0
+  },
+  priceLevels: new Map(),
+  recentTrades: [],
+  lastSignal: null,
+  lastError: null
+};
+
+function resetCandle(minute, price) {
+  state.currentCandle = {
+    minute,
+    open: price,
+    high: price,
+    low: price,
+    close: price,
+    buyVolume: 0,
+    sellVolume: 0,
+    delta: 0,
+    trades: 0
   };
+  state.priceLevels.clear();
+}
 
-  function newCandle(bucket, price) {
-    return {
-      bucket,
-      minute: bucket,
-      open: price,
-      high: price,
-      low: price,
-      close: price,
+function ensureCandle(timestamp, price) {
+  const minute = Math.floor(timestamp / 60000);
+  if (state.currentCandle.minute === null) {
+    resetCandle(minute, price);
+    return;
+  }
+  if (minute !== state.currentCandle.minute) resetCandle(minute, price);
+}
+
+function addPriceLevel(price, side, quantity) {
+  const key = price.toFixed(2);
+  if (!state.priceLevels.has(key)) {
+    state.priceLevels.set(key, {
+      price,
       buyVolume: 0,
       sellVolume: 0,
       delta: 0,
       trades: 0
-    };
-  }
-
-  function cloneCandle(c) {
-    return c ? { ...c } : null;
-  }
-
-  function cloneLevels() {
-    return Array.from(state.priceLevels.values()).map(x => ({ ...x }));
-  }
-
-  function resetM1(minute, price) {
-    state.currentCandle = newCandle(minute, price);
-    state.priceLevels.clear();
-  }
-
-  function ensureCandle(timestamp, price) {
-    const minute = Math.floor(timestamp / 60000);
-
-    if (state.currentCandle.minute === null) {
-      resetM1(minute, price);
-      return;
-    }
-
-    if (minute !== state.currentCandle.minute) {
-      const closed = cloneCandle(state.currentCandle);
-      const levels = cloneLevels();
-
-      if (closed && closed.trades > 0) {
-        state.closedM1 = closed;
-        state.closedM1PriceLevels = levels;
-        state.closedM1History.push(closed);
-
-        if (state.closedM1History.length > 100) {
-          state.closedM1History.shift();
-        }
-      }
-
-      resetM1(minute, price);
-    }
-  }
-
-  function ensureM5(timestamp, price) {
-    const bucket = Math.floor(timestamp / 300000);
-
-    if (!state.currentM5) {
-      state.currentM5 = newCandle(bucket, price);
-      return;
-    }
-
-    if (bucket !== state.currentM5.bucket) {
-      if (state.currentM5.trades > 0) {
-        state.closedM5 = cloneCandle(state.currentM5);
-      }
-
-      state.currentM5 = newCandle(bucket, price);
-    }
-  }
-
-  function updateCandle(candle, side, price, quantity) {
-    candle.high = Math.max(candle.high, price);
-    candle.low = Math.min(candle.low, price);
-    candle.close = price;
-    candle.trades += 1;
-
-    if (side === "BUY") {
-      candle.buyVolume += quantity;
-    } else {
-      candle.sellVolume += quantity;
-    }
-
-    candle.delta = candle.buyVolume - candle.sellVolume;
-  }
-
-  function addPriceLevel(price, side, quantity) {
-    const key = price.toFixed(2);
-
-    if (!state.priceLevels.has(key)) {
-      state.priceLevels.set(key, {
-        price,
-        buyVolume: 0,
-        sellVolume: 0,
-        delta: 0,
-        trades: 0
-      });
-    }
-
-    const level = state.priceLevels.get(key);
-
-    if (side === "BUY") {
-      level.buyVolume += quantity;
-      level.delta += quantity;
-    } else {
-      level.sellVolume += quantity;
-      level.delta -= quantity;
-    }
-
-    level.trades += 1;
-  }
-
-  function processTrade(data) {
-    const price = Number(data.p);
-    const quantity = Number(data.q);
-    const timestamp = Number(data.T || Date.now());
-
-    if (
-      !Number.isFinite(price) ||
-      !Number.isFinite(quantity) ||
-      quantity <= 0
-    ) {
-      return;
-    }
-
-    const side = data.m === true ? "SELL" : "BUY";
-
-    ensureM5(timestamp, price);
-    ensureCandle(timestamp, price);
-
-    updateCandle(state.currentCandle, side, price, quantity);
-    updateCandle(state.currentM5, side, price, quantity);
-
-    if (side === "BUY") {
-      state.totalBuyVolume += quantity;
-      state.totalDelta += quantity;
-    } else {
-      state.totalSellVolume += quantity;
-      state.totalDelta -= quantity;
-    }
-
-    addPriceLevel(price, side, quantity);
-
-    state.ticks += 1;
-    state.lastTradeAt = new Date(timestamp).toISOString();
-    state.lastPrice = price;
-    state.lastQuantity = quantity;
-    state.lastSide = side;
-    state.lastError = null;
-
-    state.recentTrades.push({
-      time: state.lastTradeAt,
-      price,
-      quantity,
-      side
     });
+  }
+  const level = state.priceLevels.get(key);
+  if (side === "BUY") {
+    level.buyVolume += quantity;
+    level.delta += quantity;
+  } else {
+    level.sellVolume += quantity;
+    level.delta -= quantity;
+  }
+  level.trades += 1;
+}
 
-    if (state.recentTrades.length > 100) {
-      state.recentTrades.shift();
-    }
+function processTrade(data) {
+  const price = Number(data.p);
+  const quantity = Number(data.q);
+  const timestamp = Number(data.T || Date.now());
+  if (!Number.isFinite(price) || !Number.isFinite(quantity)) return;
+
+  // m=true: buyer is maker, so seller was aggressive -> SELL.
+  // m=false: buyer is taker, so buyer was aggressive -> BUY.
+  const side = data.m === true ? "SELL" : "BUY";
+  ensureCandle(timestamp, price);
+
+  const candle = state.currentCandle;
+  candle.high = Math.max(candle.high, price);
+  candle.low = Math.min(candle.low, price);
+  candle.close = price;
+  candle.trades += 1;
+
+  if (side === "BUY") {
+    candle.buyVolume += quantity;
+    state.totalBuyVolume += quantity;
+    state.totalDelta += quantity;
+  } else {
+    candle.sellVolume += quantity;
+    state.totalSellVolume += quantity;
+    state.totalDelta -= quantity;
   }
 
-  function getFootprintLevels() {
-    return state.closedM1PriceLevels
-      .map(level => ({
-        price: level.price,
-        buyVolume: Number(level.buyVolume.toFixed(8)),
-        sellVolume: Number(level.sellVolume.toFixed(8)),
-        delta: Number(level.delta.toFixed(8)),
-        trades: level.trades
-      }))
-      .sort((a, b) => b.price - a.price);
+  candle.delta = candle.buyVolume - candle.sellVolume;
+  addPriceLevel(price, side, quantity);
+
+  state.ticks += 1;
+  state.lastTradeAt = new Date(timestamp).toISOString();
+  state.lastPrice = price;
+  state.lastQuantity = quantity;
+  state.lastSide = side;
+  state.lastError = null;
+
+  state.recentTrades.push({
+    time: state.lastTradeAt,
+    price,
+    quantity,
+    side
+  });
+  if (state.recentTrades.length > 100) state.recentTrades.shift();
+}
+
+function calculateSignal() {
+  const c = state.currentCandle;
+  if (c.open === null || c.close === null || c.trades < 1) {
+    return { signal: "WAIT", setup: "NO_DATA", reason: "Waiting for live trade data" };
   }
 
-  function getBuffer(candle) {
-    if (SL_BUFFER_MODE !== "atr") {
-      return SL_BUFFER;
-    }
+  const totalVolume = c.buyVolume + c.sellVolume;
+  if (totalVolume <= 0) return { signal: "WAIT", setup: "NO_VOLUME", reason: "No live volume available" };
 
-    const history = state.closedM1History.slice(-14);
-    const ranges = history
-      .map(x => Math.max(0, x.high - x.low))
-      .filter(Number.isFinite);
+  const deltaPercent = (c.delta / totalVolume) * 100;
+  const range = Math.max(c.high - c.low, 0.00001);
+  const body = Math.abs(c.close - c.open);
+  const upperWick = c.high - Math.max(c.open, c.close);
+  const lowerWick = Math.min(c.open, c.close) - c.low;
+  const red = c.close < c.open;
+  const green = c.close > c.open;
 
-    if (ranges.length < 5) {
-      return SL_BUFFER;
-    }
+  // Wick requirement: the rejection wick must be material relative to candle range.
+  const upperWickPct = (upperWick / range) * 100;
+  const lowerWickPct = (lowerWick / range) * 100;
+  const upperWickOk = upperWick > body * 0.50 && upperWickPct >= 15;
+  const lowerWickOk = lowerWick > body * 0.50 && lowerWickPct >= 15;
 
-    const atr = ranges.reduce((a, b) => a + b, 0) / ranges.length;
+  const levels = getFootprintLevels();
+  const levelCount = levels.length;
+  const topCount = Math.max(1, Math.ceil(levelCount * 0.25));
+  const bottomCount = Math.max(1, Math.ceil(levelCount * 0.25));
+  const topLevels = levels.slice(0, topCount);
+  const bottomLevels = levels.slice(Math.max(0, levelCount - bottomCount));
 
-    return Math.max(
-      SL_BUFFER * 0.25,
-      atr * ATR_BUFFER_MULTIPLIER
-    );
-  }
+  const topBuy = topLevels.reduce((n, x) => n + x.buyVolume, 0);
+  const topSell = topLevels.reduce((n, x) => n + x.sellVolume, 0);
+  const bottomBuy = bottomLevels.reduce((n, x) => n + x.buyVolume, 0);
+  const bottomSell = bottomLevels.reduce((n, x) => n + x.sellVolume, 0);
 
-  function calculateSignal() {
-    const c = state.closedM1;
-    const m5 = state.closedM5;
+  // Price-level absorption proxy: aggressive flow is concentrated at the rejected extreme.
+  const bearishAbsorption = topBuy > 0 && topBuy >= topSell * ABSORPTION_RATIO;
+  const bullishAbsorption = bottomSell > 0 && bottomSell >= bottomBuy * ABSORPTION_RATIO;
 
-    if (!c || c.open == null || c.close == null || c.trades < 1) {
-      return {
-        signal: "WAIT",
-        setup: "WAIT_M1_CLOSE",
-        reason: "Waiting for a completed M1 footprint candle"
-      };
-    }
+  const bearishDelta = deltaPercent >= MIN_DELTA_PERCENT;
+  const bullishDelta = deltaPercent <= -MIN_DELTA_PERCENT;
 
-    if (!m5 || m5.open == null || m5.close == null || m5.trades < 1) {
-      return {
-        signal: "WAIT",
-        setup: "WAIT_M5_CLOSE",
-        reason: "Waiting for a completed M5 confirmation candle",
-        m1: c
-      };
-    }
-
-    const totalVolume = c.buyVolume + c.sellVolume;
-
-    if (totalVolume <= 0) {
-      return {
-        signal: "WAIT",
-        setup: "NO_VOLUME",
-        reason: "Closed M1 candle has no volume"
-      };
-    }
-
-    const deltaPercent = (c.delta / totalVolume) * 100;
-    const range = Math.max(c.high - c.low, 0.00001);
-    const body = Math.abs(c.close - c.open);
-
-    const upperWick = c.high - Math.max(c.open, c.close);
-    const lowerWick = Math.min(c.open, c.close) - c.low;
-
-    const red = c.close < c.open;
-    const green = c.close > c.open;
-
-    const upperWickPct = (upperWick / range) * 100;
-    const lowerWickPct = (lowerWick / range) * 100;
-
-    const upperWickOk =
-      upperWick > body * 0.50 && upperWickPct >= 15;
-
-    const lowerWickOk =
-      lowerWick > body * 0.50 && lowerWickPct >= 15;
-
-    const levels = getFootprintLevels();
-    const levelCount = levels.length;
-    const topCount = Math.max(1, Math.ceil(levelCount * 0.25));
-    const bottomCount = Math.max(1, Math.ceil(levelCount * 0.25));
-
-    const topLevels = levels.slice(0, topCount);
-    const bottomLevels = levels.slice(
-      Math.max(0, levelCount - bottomCount)
-    );
-
-    const topBuy = topLevels.reduce((n, x) => n + x.buyVolume, 0);
-    const topSell = topLevels.reduce((n, x) => n + x.sellVolume, 0);
-    const bottomBuy = bottomLevels.reduce((n, x) => n + x.buyVolume, 0);
-    const bottomSell = bottomLevels.reduce((n, x) => n + x.sellVolume, 0);
-
-    const bearishAbsorption =
-      topBuy > 0 && topBuy >= topSell * ABSORPTION_RATIO;
-
-    const bullishAbsorption =
-      bottomSell > 0 && bottomSell >= bottomBuy * ABSORPTION_RATIO;
-
-    const bearishDelta = deltaPercent >= MIN_DELTA_PERCENT;
-    const bullishDelta = deltaPercent <= -MIN_DELTA_PERCENT;
-    const volumeOk = totalVolume >= MIN_M1_TOTAL_VOLUME;
-
-    const m5Bullish = m5.close > m5.open;
-    const m5Bearish = m5.close < m5.open;
-
-    const buffer = getBuffer(c);
-
-    const common = {
+  if (red && upperWickOk && bearishDelta && bearishAbsorption) {
+    const entry = c.close;
+    const stopLoss = c.high + SL_BUFFER;
+    const risk = Math.max(stopLoss - entry, 0.01);
+    const takeProfit = entry - risk * TP_RR;
+    return {
+      signal: "SELL",
+      setup: "FOOTPRINT_BUYER_ABSORPTION",
+      confidence: "CONFIRMED_RULESET",
+      candle: "RED",
       deltaPercent: Number(deltaPercent.toFixed(2)),
-      totalVolume: Number(totalVolume.toFixed(8)),
-      minVolumeRequired: MIN_M1_TOTAL_VOLUME,
-      volumeOk,
-      m1Minute: c.minute,
-      m5Bucket: m5.bucket,
-      m5Direction: m5Bullish
-        ? "BULLISH"
-        : m5Bearish
-          ? "BEARISH"
-          : "FLAT",
-      m5Open: m5.open,
-      m5High: m5.high,
-      m5Low: m5.low,
-      m5Close: m5.close,
       upperWickPct: Number(upperWickPct.toFixed(2)),
+      absorption: { topBuy: Number(topBuy.toFixed(6)), topSell: Number(topSell.toFixed(6)), ratio: Number((topBuy / Math.max(topSell, 0.000001)).toFixed(2)) },
+      levels: { entry, stopLoss: Number(stopLoss.toFixed(2)), takeProfit: Number(takeProfit.toFixed(2)), risk: Number(risk.toFixed(2)), rr: TP_RR },
+      reason: "Red candle + material upper wick + positive delta + buy-flow concentration at the upper footprint levels."
+    };
+  }
+
+  if (green && lowerWickOk && bullishDelta && bullishAbsorption) {
+    const entry = c.close;
+    const stopLoss = Math.max(c.low - SL_BUFFER, 0.01);
+    const risk = Math.max(entry - stopLoss, 0.01);
+    const takeProfit = entry + risk * TP_RR;
+    return {
+      signal: "BUY",
+      setup: "FOOTPRINT_SELLER_ABSORPTION",
+      confidence: "CONFIRMED_RULESET",
+      candle: "GREEN",
+      deltaPercent: Number(deltaPercent.toFixed(2)),
       lowerWickPct: Number(lowerWickPct.toFixed(2)),
-      absorptionRatioRequired: ABSORPTION_RATIO,
-      deltaThresholdRequired: MIN_DELTA_PERCENT,
-      slBuffer: Number(buffer.toFixed(5)),
-      slBufferMode: SL_BUFFER_MODE
-    };
-
-    if (
-      volumeOk &&
-      red &&
-      upperWickOk &&
-      bearishDelta &&
-      bearishAbsorption &&
-      m5Bearish
-    ) {
-      const entry = c.close;
-      const stopLoss = c.high + buffer;
-      const risk = Math.max(stopLoss - entry, 0.01);
-      const takeProfit = entry - risk * TP_RR;
-
-      return {
-        signal: "SELL",
-        setup: "M5_BEARISH_M1_BUYER_ABSORPTION",
-        confidence: "CLOSED_M1_M5_CONFIRMED",
-        candle: "RED",
-        ...common,
-        absorption: {
-          topBuy: Number(topBuy.toFixed(6)),
-          topSell: Number(topSell.toFixed(6)),
-          ratio: Number(
-            (topBuy / Math.max(topSell, 0.000001)).toFixed(2)
-          )
-        },
-        levels: {
-          entry,
-          stopLoss: Number(stopLoss.toFixed(2)),
-          takeProfit: Number(takeProfit.toFixed(2)),
-          risk: Number(risk.toFixed(2)),
-          rr: TP_RR
-        },
-        reason:
-          "Closed bearish M5 + closed red M1 rejection wick + positive delta + buyer absorption + volume gate."
-      };
-    }
-
-    if (
-      volumeOk &&
-      green &&
-      lowerWickOk &&
-      bullishDelta &&
-      bullishAbsorption &&
-      m5Bullish
-    ) {
-      const entry = c.close;
-      const stopLoss = Math.max(c.low - buffer, 0.01);
-      const risk = Math.max(entry - stopLoss, 0.01);
-      const takeProfit = entry + risk * TP_RR;
-
-      return {
-        signal: "BUY",
-        setup: "M5_BULLISH_M1_SELLER_ABSORPTION",
-        confidence: "CLOSED_M1_M5_CONFIRMED",
-        candle: "GREEN",
-        ...common,
-        absorption: {
-          bottomBuy: Number(bottomBuy.toFixed(6)),
-          bottomSell: Number(bottomSell.toFixed(6)),
-          ratio: Number(
-            (bottomSell / Math.max(bottomBuy, 0.000001)).toFixed(2)
-          )
-        },
-        levels: {
-          entry,
-          stopLoss: Number(stopLoss.toFixed(2)),
-          takeProfit: Number(takeProfit.toFixed(2)),
-          risk: Number(risk.toFixed(2)),
-          rr: TP_RR
-        },
-        reason:
-          "Closed bullish M5 + closed green M1 rejection wick + negative delta + seller absorption + volume gate."
-      };
-    }
-
-    let reason = "Closed M1/M5 conditions not aligned.";
-
-    if (!volumeOk) {
-      reason = "M1 absolute volume below MIN_M1_TOTAL_VOLUME.";
-    } else if (
-      red &&
-      upperWickOk &&
-      bearishDelta &&
-      bearishAbsorption &&
-      !m5Bearish
-    ) {
-      reason = "SELL blocked: latest closed M5 is not bearish.";
-    } else if (
-      green &&
-      lowerWickOk &&
-      bullishDelta &&
-      bullishAbsorption &&
-      !m5Bullish
-    ) {
-      reason = "BUY blocked: latest closed M5 is not bullish.";
-    }
-
-    return {
-      signal: "WAIT",
-      setup: "NONE",
-      confidence: "NO_SETUP",
-      ...common,
-      absorption: {
-        bearish: bearishAbsorption,
-        bullish: bullishAbsorption,
-        topBuy: Number(topBuy.toFixed(6)),
-        topSell: Number(topSell.toFixed(6)),
-        bottomBuy: Number(bottomBuy.toFixed(6)),
-        bottomSell: Number(bottomSell.toFixed(6))
-      },
-      reason
-    };
-  }
-
-  function authorized(req) {
-    if (!EXECUTION_SECRET) return true;
-    return String(req.headers["x-execution-secret"] || "") === EXECUTION_SECRET;
-  }
-
-  function buildExecutionSignal() {
-    const diagnostic = calculateSignal();
-    const executable =
-      diagnostic.signal === "BUY" || diagnostic.signal === "SELL";
-
-    const id =
-      `${diagnostic.signal}_${diagnostic.m1Minute ?? state.closedM1?.minute ?? "NA"}_${diagnostic.m5Bucket ?? state.closedM5?.bucket ?? "NA"}`;
-
-    const result = {
-      success: true,
-      instrument: "XAUUSD",
-      sourceInstrument: SYMBOL,
-      generatedAt: new Date().toISOString(),
-      signalId: id,
-      signal: diagnostic.signal,
-      setup: diagnostic.setup,
-      executable,
-      dryRun: DRY_RUN,
-      autoTrade: false,
-      lots: getDynamicLot("orderflow"),
-      priceSource: "Binance Futures XAUUSDT aggTrade",
-      currentPrice: state.lastPrice,
-      liveFlow: {
-        M1: state.currentCandle,
-        M5: state.currentM5
-      },
-      levels: diagnostic.levels || null,
-      diagnostic,
-      executionRules: {
-        entryCandle: "closed M1",
-        confirmation: "latest closed M5 same direction",
-        rr: TP_RR,
-        minDeltaPercent: MIN_DELTA_PERCENT,
-        absorptionRatio: ABSORPTION_RATIO,
-        minM1TotalVolume: MIN_M1_TOTAL_VOLUME
-      }
-    };
-
-    if (executable && id !== lastLoggedSignalKey) {
-      lastLoggedSignalKey = id;
-      console.log(
-        "ORDERFLOW SIGNAL AUDIT",
-        JSON.stringify({
-          at: result.generatedAt,
-          id,
-          signal: result.signal,
-          m1: diagnostic.m1Minute,
-          m5: diagnostic.m5Bucket,
-          deltaPercent: diagnostic.deltaPercent,
-          absorption: diagnostic.absorption,
-          volume: diagnostic.totalVolume,
-          entry: diagnostic.levels?.entry,
-          sl: diagnostic.levels?.stopLoss,
-          tp: diagnostic.levels?.takeProfit
-        })
-      );
-    }
-
-    return result;
-  }
-
-  function connectBinance() {
-    if (binanceWs) {
-      try {
-        binanceWs.removeAllListeners();
-        binanceWs.close();
-      } catch {}
-    }
-
-    state.websocketConnected = false;
-    console.log("Connecting to Binance:", BINANCE_WS_URL);
-
-    binanceWs = new WebSocket(BINANCE_WS_URL);
-
-    binanceWs.on("open", () => {
-      state.websocketConnected = true;
-      state.lastError = null;
-      reconnectCount = 0;
-      console.log("BINANCE WEBSOCKET CONNECTED");
-    });
-
-    binanceWs.on("message", raw => {
-      try {
-        const parsed = JSON.parse(raw.toString());
-        const message = parsed && parsed.data ? parsed.data : parsed;
-
-        if (message && message.e === "aggTrade" && message.s === SYMBOL) {
-          processTrade(message);
-        }
-      } catch (error) {
-        state.lastError = `Message parse error: ${error.message}`;
-        console.error(state.lastError);
-      }
-    });
-
-    binanceWs.on("error", error => {
-      state.lastError = `WebSocket error: ${error.message}`;
-      console.error(state.lastError);
-    });
-
-    binanceWs.on("close", (code, reason) => {
-      state.websocketConnected = false;
-      console.log(
-        "BINANCE WEBSOCKET CLOSED:",
-        code,
-        reason ? reason.toString() : ""
-      );
-      scheduleReconnect();
-    });
-  }
-
-  function scheduleReconnect() {
-    if (reconnectTimer) return;
-
-    reconnectCount += 1;
-    const delay = Math.min(30000, 2000 * reconnectCount);
-
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null;
-      connectBinance();
-    }, delay);
-  }
-
-  function getCandleOutput() {
-    const c = state.currentCandle;
-
-    return {
-      minute: c.minute,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-      buyVolume: Number(c.buyVolume.toFixed(8)),
-      sellVolume: Number(c.sellVolume.toFixed(8)),
-      delta: Number(c.delta.toFixed(8)),
-      trades: c.trades,
-      lastClosedM1: state.closedM1,
-      lastClosedM5: state.closedM5
+      absorption: { bottomBuy: Number(bottomBuy.toFixed(6)), bottomSell: Number(bottomSell.toFixed(6)), ratio: Number((bottomSell / Math.max(bottomBuy, 0.000001)).toFixed(2)) },
+      levels: { entry, stopLoss: Number(stopLoss.toFixed(2)), takeProfit: Number(takeProfit.toFixed(2)), risk: Number(risk.toFixed(2)), rr: TP_RR },
+      reason: "Green candle + material lower wick + negative delta + sell-flow concentration at the lower footprint levels."
     };
   }
 
   return {
-    SYMBOL,
-    BINANCE_WS_URL,
-    DRY_RUN,
-    state,
-    calculateSignal,
-    buildExecutionSignal,
-    connectBinance,
-    getCandleOutput,
-    getFootprintLevels,
-    authorized
+    signal: "WAIT",
+    setup: "NONE",
+    confidence: "NO_SETUP",
+    deltaPercent: Number(deltaPercent.toFixed(2)),
+    upperWickPct: Number(upperWickPct.toFixed(2)),
+    lowerWickPct: Number(lowerWickPct.toFixed(2)),
+    absorption: { bearish: bearishAbsorption, bullish: bullishAbsorption },
+    reason: "All required footprint conditions are not aligned."
   };
+}
+
+function authorized(req) {
+  if (!EXECUTION_SECRET) return true;
+  return String(req.headers["x-execution-secret"] || "") === EXECUTION_SECRET;
+}
+
+function buildExecutionSignal() {
+  const diagnostic = calculateSignal();
+  const executable = diagnostic.signal === "BUY" || diagnostic.signal === "SELL";
+  const id = `${diagnostic.signal}_${state.currentCandle.minute ?? "NA"}`;
+  return {
+    success: true,
+    instrument: "XAUUSD",
+    sourceInstrument: SYMBOL,
+    generatedAt: new Date().toISOString(),
+    signalId: id,
+    signal: diagnostic.signal,
+    setup: diagnostic.setup,
+    executable,
+    dryRun: DRY_RUN,
+    autoTrade: false,
+    lots: getDynamicLot("orderflow"),
+    priceSource: "Binance Futures XAUUSDT aggTrade",
+    currentPrice: state.lastPrice,
+    levels: diagnostic.levels || null,
+    diagnostic
+  };
+}
+function connectBinance() {
+  if (binanceWs) {
+    try { binanceWs.removeAllListeners(); binanceWs.close(); } catch {}
+  }
+  state.websocketConnected = false;
+  console.log("Connecting to Binance:", BINANCE_WS_URL);
+  binanceWs = new WebSocket(BINANCE_WS_URL);
+
+  binanceWs.on("open", () => {
+    state.websocketConnected = true;
+    state.lastError = null;
+    reconnectCount = 0;
+    console.log("BINANCE WEBSOCKET CONNECTED");
+  });
+
+  binanceWs.on("message", (raw) => {
+    try {
+      const message = JSON.parse(raw.toString());
+      if (message && message.e === "aggTrade" && message.s === SYMBOL) processTrade(message);
+    } catch (error) {
+      state.lastError = `Message parse error: ${error.message}`;
+      console.error(state.lastError);
+    }
+  });
+
+  binanceWs.on("error", (error) => {
+    state.lastError = `WebSocket error: ${error.message}`;
+    console.error(state.lastError);
+  });
+
+  binanceWs.on("close", (code, reason) => {
+    state.websocketConnected = false;
+    console.log("BINANCE WEBSOCKET CLOSED:", code, reason ? reason.toString() : "");
+    scheduleReconnect();
+  });
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectCount += 1;
+  const delay = Math.min(30000, 2000 * reconnectCount);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectBinance();
+  }, delay);
+}
+
+function getCandleOutput() {
+  const c = state.currentCandle;
+  return {
+    open: c.open,
+    high: c.high,
+    low: c.low,
+    close: c.close,
+    buyVolume: Number(c.buyVolume.toFixed(8)),
+    sellVolume: Number(c.sellVolume.toFixed(8)),
+    delta: Number(c.delta.toFixed(8)),
+    trades: c.trades
+  };
+}
+
+function getFootprintLevels() {
+  return Array.from(state.priceLevels.values())
+    .sort((a, b) => b.price - a.price)
+    .map(level => ({
+      price: level.price,
+      buyVolume: Number(level.buyVolume.toFixed(8)),
+      sellVolume: Number(level.sellVolume.toFixed(8)),
+      delta: Number(level.delta.toFixed(8)),
+      trades: level.trades
+    }));
+}
+
+
+return { SYMBOL, BINANCE_WS_URL, DRY_RUN, state, calculateSignal, buildExecutionSignal, connectBinance, getCandleOutput, getFootprintLevels, authorized };
 })();
-
-
 
 
 /* =========================================================
@@ -1069,15 +1004,28 @@ app.get("/strategy5/status", (req,res) => res.json({
 
 app.get("/p78/decision", auth, async (req,res) => {
   const x=await scanAndAlert();
+  const consumed=!!x.signalKey&&p78ConsumedSignalKeys.has(x.signalKey);
   res.status(x.success===false?500:200).json({
-    ...x, lots:getDynamicLot("p78"), telegramEnabled:telegramEnabledByStrategy.p78,
-    liquidAutoTrade:LIQUID_AUTO_TRADE, executionAllowed:LIQUID_AUTO_TRADE && !!x.executable
+    ...x, signalConsumed:consumed, lots:getDynamicLot("p78"), telegramEnabled:telegramEnabledByStrategy.p78,
+    liquidAutoTrade:LIQUID_AUTO_TRADE,
+    executionAllowed:LIQUID_AUTO_TRADE && !!x.executable && !consumed
   });
+});
+app.post("/p78/consume", auth, (req,res) => {
+  const key=String(req.body?.signalKey||"").trim();
+  if(!key)return res.status(400).json({success:false,error:"signalKey is required"});
+  if(p78ConsumedSignalKeys.has(key))return res.json({success:true,accepted:false,alreadyConsumed:true,persisted:p78StatePersisted});
+  p78ConsumedSignalKeys.add(key);
+  // Keep the in-memory list bounded; optional Render persistent disk can survive restarts.
+  while(p78ConsumedSignalKeys.size>2000)p78ConsumedSignalKeys.delete(p78ConsumedSignalKeys.values().next().value);
+  const persisted=saveP78ConsumedKeys();
+  res.json({success:true,accepted:true,alreadyConsumed:false,persisted});
 });
 app.get("/p78/status", (req,res) => res.json({
   success:true, strategy:"P78", status:"RUNNING", liquidAutoTrade:LIQUID_AUTO_TRADE,
   telegramEnabled:telegramEnabledByStrategy.p78, telegramConfigured:!!(TELEGRAM_BOT_TOKEN&&TELEGRAM_CHAT_ID),
   lastScanAt:lastScan?.generatedAt||null,lastSignalKey,lastTelegram,lastError,
+  consumedSignalCount:p78ConsumedSignalKeys.size,consumedStateFileConfigured:!!P78_STATE_FILE,persisted:p78StatePersisted,
   lot:lotBookOutput().p78, backtest:{trades:354,wins:277,losses:77,winRate:78.25,netR:255.40}
 }));
 
@@ -1150,12 +1098,62 @@ app.get("/orderflow/footprint", (req,res) => {
 });
 
 /* =========================================================
+   SECTION 6B — ORDER BLOCK HTTP endpoints (isolated per timeframe)
+   ========================================================= */
+let lastOBAlertKey = new Set();
+function orderBlockTelegramText(x) {
+  const z=x.zone||{},l=x.tradeLevels||{},s=x.signal||{},q=x.sizing||{};
+  return ["━━━━━━━━━━━━━━━━━━━━","🚨 XAUUSD ORDER BLOCK",`Timeframe: ${x.timeframe}`,"━━━━━━━━━━━━━━━━━━━━",
+    `Direction: ${s.direction||"WAIT"}`,`Entry: ${l.entry??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,
+    `Zone: ${z.zoneLow??"N/A"} - ${z.zoneHigh??"N/A"}`,`Lots: ${q.lots??"N/A"}`,
+    `Estimated risk: ${q.estimatedRisk??"N/A"} (${q.riskPercent??"N/A"}% equity)`,
+    "First touch only | Displacement body >= 1 ATR | close breaks prior 10-candle structure",
+    "Trail: +1% equity => SL entry; +2% => lock +1%; +3% => lock +2%; continues beyond +3%.",
+    "Broker order/SL modification requires Liquid Chart execution bridge.","━━━━━━━━━━━━━━━━━━━━"].join("\n");
+}
+app.get("/orderblock/decision", auth, async (req,res) => {
+  try {
+    const timeframe=String(req.query.timeframe||"5M").toUpperCase();
+    const equity=Number(req.query.equity);
+    const x=await orderBlockScan(timeframe,equity);
+    if(x.executable && x.signalKey && !lastOBAlertKey.has(x.signalKey)){
+      lastOBAlertKey.add(x.signalKey);
+      const alert=await sendTelegram("orderblock",orderBlockTelegramText(x));
+      orderBlockState[timeframe].lastAlert={...alert,signalKey:x.signalKey,attemptedAt:new Date().toISOString()};
+    }
+    res.status(200).json({...x,telegramEnabled:telegramEnabledByStrategy.orderblock,contractSize:OB_CONTRACT_SIZE,
+      equityProvided:Number.isFinite(equity)&&equity>0,activeTrades:Object.fromEntries(Object.entries(orderBlockState).map(([tf,v])=>[tf,v.activeTrade]))});
+  } catch(e) {
+    const tf=String(req.query.timeframe||"5M").toUpperCase(); if(orderBlockState[tf])orderBlockState[tf].lastError=e.message;
+    res.status(400).json({success:false,strategy:"ORDER_BLOCK",status:"ERROR",error:e.message});
+  }
+});
+app.get("/orderblock/status", (req,res) => res.json({success:true,strategy:"ORDER_BLOCK",timeframes:orderBlockState,
+  rules:{lookbackCandles:OB_LOOKBACK,maxActiveZones:OB_MAX_ZONES,displacementBodyATR:OB_ATR_MULTIPLE,
+    structureLookback:10,firstTouchOnly:true,oneActiveTradePerTimeframe:true,maxEquityRiskPercent:1,
+    contractSize:OB_CONTRACT_SIZE,lotStep:OB_LOT_STEP,minLot:OB_MIN_LOT,maxLot:OB_MAX_LOT,
+    trailing:"+1% => entry; +2% => lock +1%; +3% => lock +2%; continue every +1%, no fixed profit close"},
+  telegramEnabled:telegramEnabledByStrategy.orderblock,lot:lotBookOutput().orderblock}));
+app.post("/orderblock/manage", auth, (req,res) => {
+  try { res.json(obManagePosition(req.body?.timeframe,req.body?.currentPrice,req.body?.equity)); }
+  catch(e) { res.status(400).json({success:false,error:e.message}); }
+});
+app.post("/orderblock/close", auth, (req,res) => {
+  const tf=String(req.body?.timeframe||"").toUpperCase();
+  if(!OB_TIMEFRAMES[tf])return res.status(400).json({success:false,error:"timeframe must be 5M, 15M, or 1H."});
+  const trade=orderBlockState[tf].activeTrade;
+  if(!trade)return res.status(400).json({success:false,error:`No active Order Block trade for ${tf}.`});
+  orderBlockState[tf].activeTrade=null;
+  res.json({success:true,closedTrade:trade,timeframe:tf});
+});
+
+/* =========================================================
    SECTION 7 — independent Telegram switches and compounding results
    ========================================================= */
 app.post("/telegram/:strategy", auth, (req,res) => {
   const key=String(req.params.strategy||"").toLowerCase();
   if (!Object.prototype.hasOwnProperty.call(telegramEnabledByStrategy,key)) {
-    return res.status(400).json({success:false,error:"Use strategy5, p78, or orderflow."});
+    return res.status(400).json({success:false,error:"Use strategy5, p78, orderflow, or orderblock."});
   }
   telegramEnabledByStrategy[key]=!!req.body?.enabled;
   res.json({success:true,strategy:key,telegramEnabled:telegramEnabledByStrategy[key]});
@@ -1172,7 +1170,14 @@ app.post("/risk/:strategy/result", (req,res) => {
   const strategy=String(req.params.strategy||"").toLowerCase();
   try {
     const result=applyTradeResult(strategy,req.body?.result,req.body?.pnl);
-    res.json({success:true,...result,lotBook:lotBookOutput()});
+    let closedOrderBlockTrade=null;
+    if(strategy==="orderblock" && req.body?.timeframe){
+      const tf=String(req.body.timeframe).toUpperCase();
+      if(!OB_TIMEFRAMES[tf])throw new Error("timeframe must be 5M, 15M, or 1H.");
+      closedOrderBlockTrade=orderBlockState[tf].activeTrade;
+      orderBlockState[tf].activeTrade=null;
+    }
+    res.json({success:true,...result,closedOrderBlockTrade,lotBook:lotBookOutput()});
   } catch(e) {
     res.status(400).json({success:false,error:e.message});
   }
@@ -1186,7 +1191,8 @@ app.get("/risk/status", (req,res) => res.json({
    SECTION 8 — Telegram command controls
    Commands: /start_s5 /stop_s5 /status_s5
              /start_p78 /stop_p78 /status_p78
-             /start_orderflow /stop_orderflow /status_orderflow /status_all
+             /start_orderflow /stop_orderflow /status_orderflow
+             /start_orderblock /stop_orderblock /status_orderblock /status_all
    ========================================================= */
 let telegramUpdateOffset=0;
 let telegramPollingBusy=false;
@@ -1206,7 +1212,8 @@ async function pollTelegramCommands() {
       const controls={
         "/start_s5":["strategy5",true],"/stop_s5":["strategy5",false],
         "/start_p78":["p78",true],"/stop_p78":["p78",false],
-        "/start_orderflow":["orderflow",true],"/stop_orderflow":["orderflow",false]
+        "/start_orderflow":["orderflow",true],"/stop_orderflow":["orderflow",false],
+        "/start_orderblock":["orderblock",true],"/stop_orderblock":["orderblock",false]
       };
       if (controls[command]) {
         const [strategy,enabled]=controls[command];
@@ -1218,11 +1225,14 @@ async function pollTelegramCommands() {
         await sendTelegramRaw(`P78 Telegram: ${telegramEnabledByStrategy.p78?"ON":"OFF"} | Lot: ${getDynamicLot("p78")}`);
       } else if (command==="/status_orderflow") {
         await sendTelegramRaw(`Order Flow Telegram: ${telegramEnabledByStrategy.orderflow?"ON":"OFF"} | Lot: ${getDynamicLot("orderflow")}`);
+      } else if (command==="/status_orderblock") {
+        await sendTelegramRaw(`Order Block Telegram: ${telegramEnabledByStrategy.orderblock?"ON":"OFF"} | Lot: ${getDynamicLot("orderblock")} | Active: ${Object.entries(orderBlockState).filter(([tf,v])=>v.activeTrade).map(([tf])=>tf).join(",")||"NONE"}`);
       } else if (command==="/status_all") {
         await sendTelegramRaw([
           `Strategy #5: ${telegramEnabledByStrategy.strategy5?"ON":"OFF"} | Lot ${getDynamicLot("strategy5")}`,
           `P78: ${telegramEnabledByStrategy.p78?"ON":"OFF"} | Lot ${getDynamicLot("p78")}`,
-          `Order Flow: ${telegramEnabledByStrategy.orderflow?"ON":"OFF"} | Lot ${getDynamicLot("orderflow")}`
+          `Order Flow: ${telegramEnabledByStrategy.orderflow?"ON":"OFF"} | Lot ${getDynamicLot("orderflow")}`,
+          `Order Block: ${telegramEnabledByStrategy.orderblock?"ON":"OFF"} | Lot ${getDynamicLot("orderblock")}`
         ].join("\n"));
       }
     }
@@ -1248,18 +1258,20 @@ async function sendTelegramRaw(message) {
    SECTION 9 — Common health/root routes and one server listener
    ========================================================= */
 app.get("/", (req,res) => res.json({
-  success:true,service:"XAUUSD Three-Strategy Signal Server",port:PORT,
-  strategies:["strategy5","p78","orderflow"],
+  success:true,service:"XAUUSD Four-Strategy Signal Server",port:PORT,
+  strategies:["strategy5","p78","orderflow","orderblock"],
   endpoints:[
-    "/strategy5/decision","/strategy5/status","/p78/decision","/p78/status",
+    "/strategy5/decision","/strategy5/status","/p78/decision","POST /p78/consume","/p78/status",
     "/orderflow/signal","/orderflow/execution-signal","/orderflow/status","/orderflow/footprint",
+    "/orderblock/decision?timeframe=5M&equity=1000","/orderblock/status","POST /orderblock/manage","POST /orderblock/close",
     "/telegram/status","POST /telegram/:strategy","POST /risk/:strategy/result","/risk/status","/health"
   ]
 }));
 app.get("/health", (req,res) => res.json({
-  success:true,status:"ok",service:"XAUUSD Three-Strategy Signal Server",
+  success:true,status:"ok",service:"XAUUSD Four-Strategy Signal Server",
   orderFlowWebSocketConnected:orderFlow.state.websocketConnected,
   orderFlowTicks:orderFlow.state.ticks,
+  orderBlockActiveTrades:Object.fromEntries(Object.entries(orderBlockState).map(([tf,v])=>[tf,!!v.activeTrade])),
   lastP78Error:lastError
 }));
 
@@ -1268,10 +1280,11 @@ setTimeout(() => { scanStrategy5AndAlert(); scanAndAlert(); }, 20000);
 setInterval(scanStrategy5AndAlert, 30000);
 setInterval(scanAndAlert, 60000);
 setInterval(scanOrderFlowAndAlert, 5000);
+setInterval(scanOrderBlockAndAlert, 15000);
 setInterval(pollTelegramCommands, 4000);
 
 app.listen(PORT,"0.0.0.0",() => {
-  console.log(`XAUUSD Three-Strategy Server listening on ${PORT}`);
+  console.log(`XAUUSD Four-Strategy Server listening on ${PORT}`);
   console.log(`Order Flow Binance stream: ${orderFlow.BINANCE_WS_URL}`);
   orderFlow.connectBinance();
 });
