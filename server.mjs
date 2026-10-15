@@ -20,6 +20,15 @@ const LIQUID_AUTO_TRADE =
   String(process.env.LIQUID_AUTO_TRADE || "false").toLowerCase() === "true";
 const HF_SECRET = process.env.HF_SECRET || "";
 
+// Shared request guard used by /strategy5/decision and /master/decision.
+// If HF_SECRET is configured in Render, callers must send x-hf-secret.
+function auth(req, res, next) {
+  if (HF_SECRET && String(req.headers["x-hf-secret"] || "") !== HF_SECRET) {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+  return next();
+}
+
 const SYMBOL = "XAU/USD";
 const OUTPUT_SYMBOL = "XAUUSD";
 const TF = { "1H": "1h", "15M": "15min", "5M": "5min" };
@@ -480,7 +489,7 @@ app.get("/strategy5/status", (req, res) =>
 );
 
 /* =========================================================
-   MASTER XAUUSD STRATEGIES — COMPLETE SEPARATE ENGINE
+   MASTER XAUUSD STRATEGIES — SEPARATE CONFIRMATION-GATED ENGINE
    Candlestick + Market Structure + Chart Patterns
    Signal timeframe 5M; D1/H1/15M are context only.
    Closed candles only. RR 1:3. No P78 code/routes.
@@ -520,17 +529,37 @@ function mPivots(c,left=3,right=3){
   return {highs,lows};
 }
 function mEmit(out,id,side,c,atr,reason,slOverride=null){
-  const x=last(c); if(!x||!atr||atr<=0)return;
+  const x=last(c); if(!x||!atr||atr<=0||c.length<25)return;
   const entry=x.close;
+  // Avoid entries on weak close-only pokes; breakout candles need meaningful body and close near the extreme.
+  const body=mBody(x),range=mRange(x),upper=mUpper(x),lower=mLower(x);
+  const isBreak=/BREAK|BOS|CHOCH|OUTSIDE|THREE_LINE_STRIKE|MOMENTUM|ORB|PENNANT|FLAG|TRIANGLE|RECTANGLE|CUP_HANDLE|HEAD_SHOULDERS|DOUBLE_TOP|DOUBLE_BOTTOM|TRIPLE_TOP|TRIPLE_BOTTOM|FVG_RETEST|ORDER_BLOCK_BREAK|DEMAND_RECLAIM|SUPPLY_REJECT|MITIGATION_BLOCK|INDUCEMENT/.test(id);
+  if(isBreak && body<atr*.12)return;
+  if(isBreak && side==='BUY' && x.close < x.low+range*.55)return;
+  if(isBreak && side==='SELL' && x.close > x.high-range*.55)return;
+  // Reversal patterns need a location: within 1.25 ATR of a previously confirmed swing or a sweep of that level.
+  const reversal=/CANDLE_(HAMMER|INVERTED_HAMMER|HANGING_MAN|SHOOTING_STAR|PIN_BAR|DRAGONFLY|GRAVESTONE|BULLISH_ENGULFING|BEARISH_ENGULFING|MORNING_STAR|EVENING_STAR|HARAMI|PIERCING_LINE|DARK_CLOUD_COVER|TWEEZER|ABANDONED_BABY|COUNTERATTACK|MATCHING_LOW|MATCHING_HIGH|HOMING_PIGEON|STICK_SANDWICH)/.test(id);
+  if(reversal){
+    const hist=c.slice(0,-1),piv=mPivots(hist,3,3),sh=last(piv.highs),sl=last(piv.lows);
+    const nearLow=!!(sl&&Math.abs(x.low-sl.p)<=atr*1.25);
+    const nearHigh=!!(sh&&Math.abs(x.high-sh.p)<=atr*1.25);
+    const sweptLow=!!(sl&&x.low<sl.p&&x.close>sl.p);
+    const sweptHigh=!!(sh&&x.high>sh.p&&x.close<sh.p);
+    if(side==='BUY'&&!nearLow&&!sweptLow)return;
+    if(side==='SELL'&&!nearHigh&&!sweptHigh)return;
+  }
   const fallback=side==='BUY'?mMin(c.slice(-3).map(z=>z.low))-atr*.1:mMax(c.slice(-3).map(z=>z.high))+atr*.1;
-  const sl=Number.isFinite(slOverride)?slOverride:fallback;
+  let sl=Number.isFinite(slOverride)?slOverride:fallback;
+  // Stop must be beyond the actual signal candle's invalidation extreme with a small volatility buffer.
+  if(side==='BUY')sl=Math.min(sl,x.low-atr*.05);else sl=Math.max(sl,x.high+atr*.05);
   const risk=Math.abs(entry-sl);
-  if(!Number.isFinite(risk)||risk<atr*.15)return;
+  if(!Number.isFinite(risk)||risk<atr*.15||risk>atr*5)return;
   const tp=side==='BUY'?entry+risk*MASTER_RR:entry-risk*MASTER_RR;
   const key=[id,side,x.time,round(entry,3)].join('|');
   if(MASTER_IDS.has(key))return;
   out.push({setupId:id,signalKey:key,strategy:id,direction:side,signal:side,executable:true,executionAllowed:true,
-    candleTime:x.time,entry:round(entry),sl:round(sl),tp:round(tp),rr:'1:3',reason});
+    candleTime:x.time,entry:round(entry),sl:round(sl),tp:round(tp),rr:'1:3',reason,
+    confirmation:{closedCandle:true,breakoutClose:isBreak,locationRequired:reversal,slBeyondSignalExtreme:true,rr:3}});
 }
 
 function mDetectCandles(c,atr,out){
@@ -542,30 +571,34 @@ function mDetectCandles(c,atr,out){
  const upContext=ema20!==null&&b.close>ema20;
  const doji=body<=range*.10, small=body<=range*.30;
 
- // Single-candle reversal patterns; require prior trend context.
- if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&downContext)
-   mEmit(out,'CANDLE_HAMMER','BUY',c,atr,'Long lower wick, small upper body, preceding bearish context');
- if(up>=Math.max(body*2,range*.45)&&dn<=range*.2&&body<=range*.4&&downContext)
-   mEmit(out,'CANDLE_INVERTED_HAMMER','BUY',c,atr,'Long upper wick after bearish context');
- if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&upContext)
-   mEmit(out,'CANDLE_HANGING_MAN','SELL',c,atr,'Long lower wick after bullish context');
- if(up>=Math.max(body*2,range*.45)&&dn<=range*.2&&body<=range*.4&&upContext)
-   mEmit(out,'CANDLE_SHOOTING_STAR','SELL',c,atr,'Long upper wick after bullish context');
- if(dn>=range*.60&&up<=range*.15&&downContext)
-   mEmit(out,'CANDLE_BULLISH_PIN_BAR','BUY',c,atr,'Lower wick >=60% of range in bearish context');
- if(up>=range*.60&&dn<=range*.15&&upContext)
-   mEmit(out,'CANDLE_BEARISH_PIN_BAR','SELL',c,atr,'Upper wick >=60% of range in bullish context');
+ // One-candle reversal candidates use the previous candle; the latest CLOSED candle must confirm by breaking its extreme.
+ const cb=mBody(b),cr=mRange(b),cu=mUpper(b),cd=mLower(b);
+ const priorEma=mEmaLast(c.slice(0,-2),20);
+ const priorDown=priorEma!==null&&a.close<priorEma;
+ const priorUp=priorEma!==null&&a.close>priorEma;
+ if(cd>=Math.max(cb*2,cr*.45)&&cu<=cr*.2&&cb<=cr*.4&&priorDown&&mBull(x)&&x.close>b.high)
+   mEmit(out,'CANDLE_HAMMER','BUY',c,atr,'Hammer candidate after bearish context; confirmed only by next closed candle breaking hammer high');
+ if(cu>=Math.max(cb*2,cr*.45)&&cd<=cr*.2&&cb<=cr*.4&&priorDown&&mBull(x)&&x.close>b.high)
+   mEmit(out,'CANDLE_INVERTED_HAMMER','BUY',c,atr,'Inverted-hammer candidate after bearish context; next closed candle breaks high');
+ if(cd>=Math.max(cb*2,cr*.45)&&cu<=cr*.2&&cb<=cr*.4&&priorUp&&mBear(x)&&x.close<b.low)
+   mEmit(out,'CANDLE_HANGING_MAN','SELL',c,atr,'Hanging-man candidate after bullish context; next closed candle breaks low');
+ if(cu>=Math.max(cb*2,cr*.45)&&cd<=cr*.2&&cb<=cr*.4&&priorUp&&mBear(x)&&x.close<b.low)
+   mEmit(out,'CANDLE_SHOOTING_STAR','SELL',c,atr,'Shooting-star candidate after bullish context; next closed candle breaks low');
+ if(cd>=cr*.60&&cu<=cr*.15&&priorDown&&mBull(x)&&x.close>b.high)
+   mEmit(out,'CANDLE_BULLISH_PIN_BAR','BUY',c,atr,'Pin-bar candidate at bearish context; confirmed by close above candidate high');
+ if(cu>=cr*.60&&cd<=cr*.15&&priorUp&&mBear(x)&&x.close<b.low)
+   mEmit(out,'CANDLE_BEARISH_PIN_BAR','SELL',c,atr,'Pin-bar candidate at bullish context; confirmed by close below candidate low');
  if(body>=range*.85&&mBull(x))mEmit(out,'CANDLE_BULLISH_MARUBOZU','BUY',c,atr,'Bull body >=85% of range');
  if(body>=range*.85&&mBear(x))mEmit(out,'CANDLE_BEARISH_MARUBOZU','SELL',c,atr,'Bear body >=85% of range');
  if(small&&up>=range*.2&&dn>=range*.2){
    if(x.close>b.high)mEmit(out,'CANDLE_SPINNING_TOP_BULL_BREAK','BUY',c,atr,'Small body with two wicks, then close above prior high');
    if(x.close<b.low)mEmit(out,'CANDLE_SPINNING_TOP_BEAR_BREAK','SELL',c,atr,'Small body with two wicks, then close below prior low');
  }
- if(doji){
-   if(downContext&&mBull(x)&&x.close>b.high)mEmit(out,'CANDLE_DOJI_BULLISH_CONFIRM','BUY',c,atr,'Doji followed by bullish close break');
-   if(upContext&&mBear(x)&&x.close<b.low)mEmit(out,'CANDLE_DOJI_BEARISH_CONFIRM','SELL',c,atr,'Doji followed by bearish close break');
-   if(dn>=range*.6&&up<=range*.1)mEmit(out,'CANDLE_DRAGONFLY_DOJI','BUY',c,atr,'Dragonfly Doji geometry with bullish close confirmation');
-   if(up>=range*.6&&dn<=range*.1)mEmit(out,'CANDLE_GRAVESTONE_DOJI','SELL',c,atr,'Gravestone Doji geometry with bearish close confirmation');
+ if(mBody(b)<=mRange(b)*.10){
+   if(downContext&&mBull(x)&&x.close>b.high)mEmit(out,'CANDLE_DOJI_BULLISH_CONFIRM','BUY',c,atr,'Prior Doji after bearish context; current close breaks Doji high');
+   if(upContext&&mBear(x)&&x.close<b.low)mEmit(out,'CANDLE_DOJI_BEARISH_CONFIRM','SELL',c,atr,'Prior Doji after bullish context; current close breaks Doji low');
+   if(mLower(b)>=mRange(b)*.6&&mUpper(b)<=mRange(b)*.1&&mBull(x)&&x.close>b.high)mEmit(out,'CANDLE_DRAGONFLY_DOJI','BUY',c,atr,'Dragonfly Doji geometry followed by close above its high');
+   if(mUpper(b)>=mRange(b)*.6&&mLower(b)<=mRange(b)*.1&&mBear(x)&&x.close<b.low)mEmit(out,'CANDLE_GRAVESTONE_DOJI','SELL',c,atr,'Gravestone Doji geometry followed by close below its low');
  }
  // Engulfing / Harami families.
  if(mBear(b)&&mBull(x)&&x.open<=b.close&&x.close>=b.open){
@@ -627,6 +660,40 @@ function mDetectCandles(c,atr,out){
  // Belt Hold strict open-near-extreme form.
  if(mBull(x)&&body>=range*.65&&dn<=range*.10)mEmit(out,'CANDLE_BULLISH_BELT_HOLD','BUY',c,atr,'Bull body opens at/near low and closes strongly');
  if(mBear(x)&&body>=range*.65&&up<=range*.10)mEmit(out,'CANDLE_BEARISH_BELT_HOLD','SELL',c,atr,'Bear body opens at/near high and closes strongly');
+ // More classical candle families. Gap-dependent names are emitted only when the feed has a real gap.
+ // Long-legged Doji / high-wave: neutral candle, trade only after range breakout.
+ if(mBody(b)<=mRange(b)*.10&&mUpper(b)>=mRange(b)*.30&&mLower(b)>=mRange(b)*.30&&x.close>b.high)
+   mEmit(out,'CANDLE_LONG_LEGGED_DOJI_BULL_BREAK','BUY',c,atr,'Long-legged Doji range broken by a closed bullish candle');
+ if(mBody(b)<=mRange(b)*.10&&mUpper(b)>=mRange(b)*.30&&mLower(b)>=mRange(b)*.30&&x.close<b.low)
+   mEmit(out,'CANDLE_LONG_LEGGED_DOJI_BEAR_BREAK','SELL',c,atr,'Long-legged Doji range broken by a closed bearish candle');
+ if(mRange(b)>0&&mBody(b)<=mRange(b)*.25&&mUpper(b)>=mRange(b)*.35&&mLower(b)>=mRange(b)*.35&&x.close>b.high)
+   mEmit(out,'CANDLE_HIGH_WAVE_BULL_BREAK','BUY',c,atr,'High-wave indecision followed by close above its high');
+ if(mRange(b)>0&&mBody(b)<=mRange(b)*.25&&mUpper(b)>=mRange(b)*.35&&mLower(b)>=mRange(b)*.35&&x.close<b.low)
+   mEmit(out,'CANDLE_HIGH_WAVE_BEAR_BREAK','SELL',c,atr,'High-wave indecision followed by close below its low');
+ // Counterattack lines: strong opposite candle closes near prior close, then next candle breaks trigger range.
+ if(mBear(a)&&mBull(b)&&mNear(b.close,a.close,atr*.12)&&x.close>b.high&&mBull(x))
+   mEmit(out,'CANDLE_BULLISH_COUNTERATTACK','BUY',c,atr,'Near-equal closing counterattack followed by bullish range break');
+ if(mBull(a)&&mBear(b)&&mNear(b.close,a.close,atr*.12)&&x.close<b.low&&mBear(x))
+   mEmit(out,'CANDLE_BEARISH_COUNTERATTACK','SELL',c,atr,'Near-equal closing counterattack followed by bearish range break');
+ // Matching lows/highs need the following candle to break the pair's trigger.
+ if(mBear(a)&&mBear(b)&&mNear(a.low,b.low,atr*.10)&&mBull(x)&&x.close>b.high)
+   mEmit(out,'CANDLE_MATCHING_LOW_CONFIRM','BUY',c,atr,'Matching lows then close above second candle high');
+ if(mBull(a)&&mBull(b)&&mNear(a.high,b.high,atr*.10)&&mBear(x)&&x.close<b.low)
+   mEmit(out,'CANDLE_MATCHING_HIGH_CONFIRM','SELL',c,atr,'Matching highs then close below second candle low');
+ // Homing pigeon / stick sandwich: require the pattern plus breakout confirmation.
+ if(mBear(a)&&mBear(b)&&b.open<a.open&&b.close>a.close&&x.close>a.high&&mBull(x))
+   mEmit(out,'CANDLE_HOMING_PIGEON_CONFIRM','BUY',c,atr,'Small bearish body inside prior bearish body then bullish break');
+ if(mBear(a)&&mBull(b)&&mBear(x)&&mNear(a.close,x.close,atr*.12)&&b.close>a.high)
+   mEmit(out,'CANDLE_STICK_SANDWICH','BUY',c,atr,'Bear-bull-bear closes near equal lows with bullish recovery condition');
+ // Separating lines and thrusting/in-neck/on-neck: require a subsequent range break.
+ if(mBear(a)&&mBull(b)&&mNear(a.open,b.open,atr*.10)&&x.close>b.high)
+   mEmit(out,'CANDLE_BULLISH_SEPARATING_LINES','BUY',c,atr,'Similar opens then bullish continuation break');
+ if(mBull(a)&&mBear(b)&&mNear(a.open,b.open,atr*.10)&&x.close<b.low)
+   mEmit(out,'CANDLE_BEARISH_SEPARATING_LINES','SELL',c,atr,'Similar opens then bearish continuation break');
+ if(mBear(b)&&mBull(x)&&x.open<b.low&&x.close> b.close&&x.close<mMid(b))
+   mEmit(out,'CANDLE_THRUSTING_LINE','BUY',c,atr,'Bull close penetrates prior bear body but not midpoint; informational low-confidence setup');
+ // Three-line strike: three candles trend, then opposite candle fully engulfs the three-candle body range.
+ if(c.length>=4){const z=c.slice(-4);if(z[0].close>z[0].open&&z[1].close>z[1].open&&z[2].close>z[2].open&&mBear(x)&&x.open>z[2].close&&x.close<z[0].open&&x.close<z[1].open&&x.close<z[2].open)mEmit(out,'CANDLE_BEARISH_THREE_LINE_STRIKE','SELL',c,atr,'Bearish strike engulfs prior three bullish bodies');if(z[0].close<z[0].open&&z[1].close<z[1].open&&z[2].close<z[2].open&&mBull(x)&&x.open<z[2].close&&x.close>z[0].open&&x.close>z[1].open&&x.close>z[2].open)mEmit(out,'CANDLE_BULLISH_THREE_LINE_STRIKE','BUY',c,atr,'Bullish strike engulfs prior three bearish bodies');}
  // Doji continuation is triggered only by a confirmed break of its range.
  if(mBody(b)<=mRange(b)*.10&&x.close>b.high)mEmit(out,'CANDLE_DOJI_CONTINUATION_BULL','BUY',c,atr,'Close breaks prior Doji high');
  if(mBody(b)<=mRange(b)*.10&&x.close<b.low)mEmit(out,'CANDLE_DOJI_CONTINUATION_BEAR','SELL',c,atr,'Close breaks prior Doji low');
@@ -645,9 +712,12 @@ function mDetectStructure(c,atr,out){
  if(l&&x.low<l.p&&x.close>l.p)mEmit(out,'STRUCTURE_SSL_SWEEP','BUY',c,atr,'Wick takes confirmed swing low, close returns above');
  if(l&&x.low<=l.p+atr*.25&&x.close>l.p&&mBull(x))mEmit(out,'STRUCTURE_SUPPORT_REJECTION','BUY',c,atr,'Bullish rejection near confirmed swing low');
  if(h&&x.high>=h.p-atr*.25&&x.close<h.p&&mBear(x))mEmit(out,'STRUCTURE_RESISTANCE_REJECTION','SELL',c,atr,'Bearish rejection near confirmed swing high');
- // FVG from three closed candles.
- const a=c[c.length-3];if(a.high<x.low)mEmit(out,'STRUCTURE_BULLISH_FVG','BUY',c,atr,'Bullish three-candle fair-value gap');
- if(a.low>x.high)mEmit(out,'STRUCTURE_BEARISH_FVG','SELL',c,atr,'Bearish three-candle fair-value gap');
+ // FVG is NOT an entry by itself: require a previously formed gap to be revisited and rejected on a closed candle.
+ for(let j=Math.max(0,c.length-20);j<c.length-3;j++){
+   const left=c[j],middle=c[j+1],right=c[j+2];
+   if(left.high<right.low){const zlo=left.high,zhi=right.low;if(x.low<=zhi&&x.high>=zlo&&mBull(x)&&x.close>zhi&&x.close>middle.close){mEmit(out,'STRUCTURE_BULLISH_FVG_RETEST','BUY',c,atr,'Previously formed bullish FVG retested; closed bullish rejection above gap');break;}}
+   if(left.low>right.high){const zlo=right.high,zhi=left.low;if(x.high>=zlo&&x.low<=zhi&&mBear(x)&&x.close<zlo&&x.close<middle.close){mEmit(out,'STRUCTURE_BEARISH_FVG_RETEST','SELL',c,atr,'Previously formed bearish FVG retested; closed bearish rejection below gap');break;}}
+ }
  // Displacement candle after opposite candle = candidate order block, not automatic retest.
  const b=prev;if(mBear(b)&&mBull(x)&&x.close>b.high&&mBody(x)>atr*.7)mEmit(out,'STRUCTURE_BULLISH_ORDER_BLOCK_BREAK','BUY',c,atr,'Bull displacement through prior bearish candle high');
  if(mBull(b)&&mBear(x)&&x.close<b.low&&mBody(x)>atr*.7)mEmit(out,'STRUCTURE_BEARISH_ORDER_BLOCK_BREAK','SELL',c,atr,'Bear displacement through prior bullish candle low');
@@ -690,12 +760,16 @@ function mDetectCharts(c,atr,out){
  if(impulse.open-impulse.close>atr*1.5&&x.close<cl)mEmit(out,'CHART_BEAR_FLAG_BREAK','SELL',c,atr,'Strong bearish impulse, short consolidation, close breakout');
  if(h2<h1&&l2>l1&&x.close>h2)mEmit(out,'CHART_WEDGE_BULL_BREAK','BUY',c,atr,'Contracting wedge approximation breaks upward');
  if(h2<h1&&l2>l1&&x.close<l2)mEmit(out,'CHART_WEDGE_BEAR_BREAK','SELL',c,atr,'Contracting wedge approximation breaks downward');
- // Pivot-based double/triple tops/bottoms and H&S candidates; only confirmed pivots.
+ // Pivot-based double/triple tops/bottoms and H&S: the neckline must break on a closed candle.
  const {highs,lows}=mPivots(c,3,3),tol=atr*.35;
- if(highs.length>=2){const z=highs.slice(-2);if(mNear(z[0].p,z[1].p,tol)&&x.close<Math.min(z[0].p,z[1].p)&&x.close<p.close)mEmit(out,'CHART_DOUBLE_TOP','SELL',c,atr,'Two similar confirmed highs with bearish neckline-side close');}
- if(lows.length>=2){const z=lows.slice(-2);if(mNear(z[0].p,z[1].p,tol)&&x.close>Math.max(z[0].p,z[1].p)&&x.close>p.close)mEmit(out,'CHART_DOUBLE_BOTTOM','BUY',c,atr,'Two similar confirmed lows with bullish neckline-side close');}
- if(highs.length>=3){const z=highs.slice(-3);if(mNear(z[0].p,z[1].p,tol)&&mNear(z[1].p,z[2].p,tol)&&x.close<z[2].p)mEmit(out,'CHART_TRIPLE_TOP','SELL',c,atr,'Three similar confirmed highs and bearish close');if(z[1].p>z[0].p&&z[1].p>z[2].p&&mNear(z[0].p,z[2].p,tol)&&x.close<Math.min(z[0].p,z[2].p))mEmit(out,'CHART_HEAD_SHOULDERS','SELL',c,atr,'Pivot approximation: higher head, similar shoulders, downside close');}
- if(lows.length>=3){const z=lows.slice(-3);if(mNear(z[0].p,z[1].p,tol)&&mNear(z[1].p,z[2].p,tol)&&x.close>z[2].p)mEmit(out,'CHART_TRIPLE_BOTTOM','BUY',c,atr,'Three similar confirmed lows and bullish close');if(z[1].p<z[0].p&&z[1].p<z[2].p&&mNear(z[0].p,z[2].p,tol)&&x.close>Math.max(z[0].p,z[2].p))mEmit(out,'CHART_INVERSE_HEAD_SHOULDERS','BUY',c,atr,'Pivot approximation: lower head, similar shoulders, upside close');}
+ function rangeMin(from,to){const a=c.slice(from+1,to);return a.length?mMin(a.map(z=>z.low)):null;}
+ function rangeMax(from,to){const a=c.slice(from+1,to);return a.length?mMax(a.map(z=>z.high)):null;}
+ if(highs.length>=2){const z=highs.slice(-2),neck=rangeMin(z[0].i,z[1].i);if(neck!==null&&mNear(z[0].p,z[1].p,tol)&&p.close>=neck&&x.close<neck)mEmit(out,'CHART_DOUBLE_TOP','SELL',c,atr,'Two similar confirmed peaks; neckline between peaks broken by closed candle',neck+atr*.1);}
+ if(lows.length>=2){const z=lows.slice(-2),neck=rangeMax(z[0].i,z[1].i);if(neck!==null&&mNear(z[0].p,z[1].p,tol)&&p.close<=neck&&x.close>neck)mEmit(out,'CHART_DOUBLE_BOTTOM','BUY',c,atr,'Two similar confirmed troughs; neckline between troughs broken by closed candle',neck-atr*.1);}
+ if(highs.length>=3){const z=highs.slice(-3),neck1=rangeMin(z[0].i,z[1].i),neck2=rangeMin(z[1].i,z[2].i);if(neck1!==null&&neck2!==null&&mNear(z[0].p,z[1].p,tol)&&mNear(z[1].p,z[2].p,tol)&&p.close>=Math.min(neck1,neck2)&&x.close<Math.min(neck1,neck2))mEmit(out,'CHART_TRIPLE_TOP','SELL',c,atr,'Three similar confirmed peaks; support neckline broken on close',Math.min(neck1,neck2)+atr*.1);
+   if(z[1].p>z[0].p&&z[1].p>z[2].p&&mNear(z[0].p,z[2].p,tol)&&neck1!==null&&neck2!==null){const neck=Math.min(neck1,neck2);if(p.close>=neck&&x.close<neck)mEmit(out,'CHART_HEAD_SHOULDERS','SELL',c,atr,'Confirmed left shoulder, higher head, similar right shoulder; neckline close-break',neck+atr*.1);}}
+ if(lows.length>=3){const z=lows.slice(-3),neck1=rangeMax(z[0].i,z[1].i),neck2=rangeMax(z[1].i,z[2].i);if(neck1!==null&&neck2!==null&&mNear(z[0].p,z[1].p,tol)&&mNear(z[1].p,z[2].p,tol)&&p.close<=Math.max(neck1,neck2)&&x.close>Math.max(neck1,neck2))mEmit(out,'CHART_TRIPLE_BOTTOM','BUY',c,atr,'Three similar confirmed troughs; resistance neckline broken on close',Math.max(neck1,neck2)-atr*.1);
+   if(z[1].p<z[0].p&&z[1].p<z[2].p&&mNear(z[0].p,z[2].p,tol)&&neck1!==null&&neck2!==null){const neck=Math.max(neck1,neck2);if(p.close<=neck&&x.close>neck)mEmit(out,'CHART_INVERSE_HEAD_SHOULDERS','BUY',c,atr,'Confirmed inverse head-and-shoulders; neckline close-break',neck-atr*.1);}}
  // Separate ascending/descending/symmetrical triangle candidates from six-bar compression.
  const flatTol=atr*.30;
  if(mNear(h1,h2,flatTol)&&l2>l1&&x.close>h1)mEmit(out,'CHART_ASCENDING_TRIANGLE_BULL','BUY',c,atr,'Near-flat resistance with rising lows and close breakout');
@@ -705,10 +779,21 @@ function mDetectCharts(c,atr,out){
  // Pennant candidates require an impulse then a contracting consolidation.
  if(impulse.close-impulse.open>atr*1.5&&h2<h1&&l2>l1&&x.close>h1)mEmit(out,'CHART_BULL_PENNANT','BUY',c,atr,'Bull impulse then contracting pennant breakout');
  if(impulse.open-impulse.close>atr*1.5&&h2<h1&&l2>l1&&x.close<l1)mEmit(out,'CHART_BEAR_PENNANT','SELL',c,atr,'Bear impulse then contracting pennant breakdown');
- // Inverse cup/handle approximation.
- if(cup.length===27){const il=cup.slice(0,7),ir=cup.slice(-7),ilAvg=il.reduce((s,z)=>s+z.close,0)/il.length,irAvg=ir.reduce((s,z)=>s+z.close,0)/ir.length;if(mNear(ilAvg,irAvg,atr*1.2)&&x.close<cl&&x.close<ilAvg)mEmit(out,'CHART_INVERSE_CUP_HANDLE','SELL',c,atr,'Rounded top approximation with handle breakdown');}
+ // Cup-and-handle and inverse cup-and-handle: rounded rim similarity, deep cup, shallow handle, then closed breakout.
+ const cup=c.slice(-28,-1);
+ if(cup.length===27){
+   const leftRim=cup.slice(0,5),middle=cup.slice(8,20),rightRim=cup.slice(21,27),handle=c.slice(-6,-1);
+   const leftAvg=leftRim.reduce((s,z)=>s+z.close,0)/leftRim.length,rightAvg=rightRim.reduce((s,z)=>s+z.close,0)/rightRim.length;
+   const cupLow=mMin(middle.map(z=>z.low)),cupHigh=mMax(middle.map(z=>z.high));
+   const handleHigh=mMax(handle.map(z=>z.high)),handleLow=mMin(handle.map(z=>z.low));
+   const rimTol=atr*1.2;
+   if(mNear(leftAvg,rightAvg,rimTol)&&cupLow<Math.min(leftAvg,rightAvg)-atr*1.5&&handleLow>cupLow+atr*.5&&x.close>handleHigh&&x.close>rightAvg)
+     mEmit(out,'CHART_CUP_HANDLE','BUY',c,atr,'Rounded cup with similar rims, shallow handle and closed upside breakout');
+   if(mNear(leftAvg,rightAvg,rimTol)&&cupHigh>Math.max(leftAvg,rightAvg)+atr*1.5&&handleHigh<cupHigh-atr*.5&&x.close<handleLow&&x.close<rightAvg)
+     mEmit(out,'CHART_INVERSE_CUP_HANDLE','SELL',c,atr,'Rounded inverse cup with similar rims, shallow handle and closed downside breakdown');
+ }
  // ORB: use first 15-minute-equivalent range of the UTC day on 5m bars.
- const day=x.time?String(x.time).slice(0,10):'';const todays=c.filter(z=>String(z.time).slice(0,10)===day);if(todays.length>=4){const opening=todays.slice(0,3),oh=mMax(opening.map(z=>z.high)),ol=mMin(opening.map(z=>z.low));if(x.close>oh&&p.close<=oh)mEmit(out,'CHART_ORB_BULL_BREAK','BUY',c,atr,'Close above first three 5m candles of UTC day');if(x.close<ol&&p.close>=ol)mEmit(out,'CHART_ORB_BEAR_BREAK','SELL',c,atr,'Close below first three 5m candles of UTC day');}
+ const day=x.time?String(x.time).slice(0,10):'';const todays=c.filter(z=>String(z.time).slice(0,10)===day);if(todays.length>=4){const opening=todays.slice(0,3),oh=mMax(opening.map(z=>z.high)),ol=mMin(opening.map(z=>z.low));if(todays.length>3&&x.close>oh&&p.close<=oh)mEmit(out,'CHART_ORB_BULL_BREAK','BUY',c,atr,'Close above first three 5m candles of UTC day');if(todays.length>3&&x.close<ol&&p.close>=ol)mEmit(out,'CHART_ORB_BEAR_BREAK','SELL',c,atr,'Close below first three 5m candles of UTC day');}
 }
 
 async function masterScan(){
@@ -722,6 +807,7 @@ async function masterScan(){
  masterLastError=null;
  return {success:true,strategy:'MASTER_XAUUSD',instrument:OUTPUT_SYMBOL,generatedAt:masterLastScan.generatedAt,closedCandleTime:last(m5).time,
    timeframes:{D1:last(d1)?.close??null,H1:last(h1)?.close??null,M15:last(m15)?.close??null,M5:last(m5)?.close??null},rr:'1:3',maxRiskPercent:1,
+   confirmationPolicy:{closedCandlesOnly:true,reversalNeedsConfirmedLocation:true,breakoutsNeedStrongClose:true,slBeyondSignalExtreme:true,complexChartPatternsAreHeuristic:true},
    executable:setups.length>0,executionAllowed:LIQUID_AUTO_TRADE&&setups.length>0,signal:setups.length?'MULTIPLE_SETUPS':'WAIT',setups,
    note:'Independent heuristic setup modules; all signals use closed candles. Complex chart formations are approximations and require backtesting before live use.'};
 }
