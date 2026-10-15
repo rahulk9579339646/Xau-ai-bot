@@ -1,12 +1,3 @@
-UPDATED FULL RENDER SERVER CODE
-================================
-
-हे पूर्ण server.mjs replacement आहे. GitHub/Render मधील जुना server.mjs पूर्णपणे replace कर.
-Strategy #5, P78 आणि Order Flow चे विद्यमान sections/routes कायम ठेवले आहेत.
-Master candlestick allowlist: आधीचे profitable patterns + RR2 निकालांत सकारात्मक असलेले candlestick families + Hammer. बाकीचे candlestick patterns filter होतात.
-Master chart-pattern आणि market-structure detectors जतन केले आहेत.
-Closed-candle confirmation कायम आहे; signal data cache 15 सेकंदांवरून 3 सेकंदांवर आणली आहे.
-
 /* =========================================================
    XAUUSD THREE-STRATEGY RENDER SERVER
    SECTION 1: Strategy #5 — Support/Resistance Rejection
