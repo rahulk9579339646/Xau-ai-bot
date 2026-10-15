@@ -495,7 +495,6 @@ app.get("/strategy5/status", (req, res) =>
    Closed candles only. RR 1:3. No P78 code/routes.
    ========================================================= */
 
-const MASTER_RR = 3;
 const MASTER_IDS = new Set();
 let masterLastScan = null;
 let masterLastError = null;
@@ -528,6 +527,31 @@ function mPivots(c,left=3,right=3){
   }
   return {highs,lows};
 }
+function mRRFor(id){
+ const s=String(id||'').toUpperCase();
+ if(s.includes('ORB'))return 2.0;
+ // Reversal chart formations use 1:2.5; continuation formations use 1:3.
+ if(/^CHART_/.test(s)&&/(DOUBLE_TOP|DOUBLE_BOTTOM|TRIPLE_TOP|TRIPLE_BOTTOM|HEAD_SHOULDERS|INVERSE_HEAD_SHOULDERS|ROUNDING_TOP|ROUNDING_BOTTOM)/.test(s))return 2.5;
+ // Liquidity, OB, mitigation and FVG setups use the zone-based 1:2 plan.
+ if(/LIQUIDITY|SWEEP|INDUCEMENT|ORDER_BLOCK|MITIGATION_BLOCK|BREAKER_BLOCK|FVG|FAIR_VALUE_GAP|IMBALANCE|DEMAND_RECLAIM|SUPPLY_REJECT/.test(s))return 2.0;
+ // Candlestick continuation families get 1:3; remaining candle patterns are reversals at 1:2.
+ if(/^CANDLE_/.test(s)){
+   if(/THREE_WHITE_SOLDIERS|THREE_BLACK_CROWS|RISING_THREE_METHODS|FALLING_THREE_METHODS|MAT_HOLD|TASUKI_GAP|THREE_LINE_STRIKE|MARUBOZU|INSIDE_BAR_.*BREAK|OUTSIDE_BAR_.*BREAK|SPINNING_TOP_.*BREAK/.test(s))return 3.0;
+   return 2.0;
+ }
+ if(/^CHART_/.test(s))return 3.0;
+ // Market structure and trend-following setups use 1:3.
+ return 3.0;
+}
+function mRiskRuleFor(id){
+ const s=String(id||'').toUpperCase();
+ if(s.includes('ORB'))return 'SL beyond opposite opening-range boundary; TP by 1:2 RR';
+ if(/^CANDLE_/.test(s))return 'SL beyond pattern candle(s) extreme + ATR buffer; TP by family RR';
+ if(/^CHART_/.test(s)&&/(DOUBLE_TOP|DOUBLE_BOTTOM|TRIPLE_TOP|TRIPLE_BOTTOM|HEAD_SHOULDERS|INVERSE_HEAD_SHOULDERS)/.test(s))return 'SL beyond pattern shoulder/peak/trough; TP by 1:2.5 RR';
+ if(/LIQUIDITY|SWEEP|INDUCEMENT|ORDER_BLOCK|MITIGATION_BLOCK|BREAKER_BLOCK|FVG|FAIR_VALUE_GAP|IMBALANCE/.test(s))return 'SL beyond zone/sweep invalidation + ATR buffer; TP by 1:2 RR';
+ if(/^CHART_/.test(s))return 'SL beyond pattern structure/signal extreme; TP by 1:3 RR';
+ return 'SL beyond confirmed swing/structure invalidation; TP by 1:3 RR';
+}
 function mEmit(out,id,side,c,atr,reason,slOverride=null){
   const x=last(c); if(!x||!atr||atr<=0||c.length<25)return;
   const entry=x.close;
@@ -548,18 +572,34 @@ function mEmit(out,id,side,c,atr,reason,slOverride=null){
     if(side==='BUY'&&!nearLow&&!sweptLow)return;
     if(side==='SELL'&&!nearHigh&&!sweptHigh)return;
   }
-  const fallback=side==='BUY'?mMin(c.slice(-3).map(z=>z.low))-atr*.1:mMax(c.slice(-3).map(z=>z.high))+atr*.1;
+  const recent3=c.slice(-3),recent10=c.slice(-10),recent40=c.slice(-40);
+  const fallback=side==='BUY'?mMin(recent3.map(z=>z.low))-atr*.1:mMax(recent3.map(z=>z.high))+atr*.1;
   let sl=Number.isFinite(slOverride)?slOverride:fallback;
-  // Stop must be beyond the actual signal candle's invalidation extreme with a small volatility buffer.
+  // Setup-specific invalidation levels rather than one universal SL.
+  if(/ORB/.test(id)){
+    const day=String(x.time||'').slice(0,10),today=c.filter(z=>String(z.time||'').slice(0,10)===day);
+    if(today.length>=3){const opening=today.slice(0,3);sl=side==='BUY'?mMin(opening.map(z=>z.low))-atr*.1:mMax(opening.map(z=>z.high))+atr*.1;}
+  } else if(/^CHART_/.test(id)&&/(DOUBLE_TOP|DOUBLE_BOTTOM|TRIPLE_TOP|TRIPLE_BOTTOM|HEAD_SHOULDERS|INVERSE_HEAD_SHOULDERS|ROUNDING_TOP|ROUNDING_BOTTOM)/.test(id)){
+    sl=side==='BUY'?mMin(recent40.map(z=>z.low))-atr*.1:mMax(recent40.map(z=>z.high))+atr*.1;
+  } else if(!Number.isFinite(slOverride)&&/LIQUIDITY|SWEEP|INDUCEMENT|ORDER_BLOCK|MITIGATION_BLOCK|BREAKER_BLOCK|FVG|FAIR_VALUE_GAP|IMBALANCE/.test(id)){
+    sl=side==='BUY'?mMin(recent10.map(z=>z.low))-atr*.1:mMax(recent10.map(z=>z.high))+atr*.1;
+  } else if(!Number.isFinite(slOverride)&&/^CHART_/.test(id)){
+    const formation=c.slice(-12,-1);
+    if(formation.length){sl=side==='BUY'?mMin(formation.map(z=>z.low))-atr*.1:mMax(formation.map(z=>z.high))+atr*.1;}
+  }
+  // Always keep SL beyond the signal candle extreme with a small volatility buffer.
   if(side==='BUY')sl=Math.min(sl,x.low-atr*.05);else sl=Math.max(sl,x.high+atr*.05);
   const risk=Math.abs(entry-sl);
   if(!Number.isFinite(risk)||risk<atr*.15||risk>atr*5)return;
-  const tp=side==='BUY'?entry+risk*MASTER_RR:entry-risk*MASTER_RR;
+  const rr=mRRFor(id);
+  const tp=side==='BUY'?entry+risk*rr:entry-risk*rr;
   const key=[id,side,x.time,round(entry,3)].join('|');
   if(MASTER_IDS.has(key))return;
   out.push({setupId:id,signalKey:key,strategy:id,direction:side,signal:side,executable:true,executionAllowed:true,
-    candleTime:x.time,entry:round(entry),sl:round(sl),tp:round(tp),rr:'1:3',reason,
-    confirmation:{closedCandle:true,breakoutClose:isBreak,locationRequired:reversal,slBeyondSignalExtreme:true,rr:3}});
+    candleTime:x.time,entry:round(entry),sl:round(sl),tp:round(tp),rr,rrText:'1:'+rr,reason,
+    stopRule:mRiskRuleFor(id),takeProfitRule:'Entry-to-SL risk multiplied by '+rr,
+    trailingRule:'At +1R move SL to breakeven; then each additional +0.5R locks another +0.5R',
+    confirmation:{closedCandle:true,breakoutClose:isBreak,locationRequired:reversal,slBeyondSignalExtreme:true,rr}});
 }
 
 function mDetectCandles(c,atr,out){
@@ -809,13 +849,15 @@ async function masterScan(){
    timeframes:{D1:last(d1)?.close??null,H1:last(h1)?.close??null,M15:last(m15)?.close??null,M5:last(m5)?.close??null},rr:'1:3',maxRiskPercent:1,
    confirmationPolicy:{closedCandlesOnly:true,reversalNeedsConfirmedLocation:true,breakoutsNeedStrongClose:true,slBeyondSignalExtreme:true,complexChartPatternsAreHeuristic:true},
    executable:setups.length>0,executionAllowed:LIQUID_AUTO_TRADE&&setups.length>0,signal:setups.length?'MULTIPLE_SETUPS':'WAIT',setups,
+   rrPolicy:{candlestickReversal:'1:2',candlestickContinuation:'1:3',chartReversal:'1:2.5',chartContinuation:'1:3',orb:'1:2',liquidityOrderBlockFVG:'1:2',marketStructureTrend:'1:3'},
+   trailingPolicy:'At +1R SL to breakeven; thereafter each +0.5R in open profit advances SL by +0.5R',
    note:'Independent heuristic setup modules; all signals use closed candles. Complex chart formations are approximations and require backtesting before live use.'};
 }
 
 app.get('/master/decision',auth,async(req,res)=>{
  try{res.json(await masterScan());}catch(e){masterLastError=e.message;res.status(503).json({success:false,strategy:'MASTER_XAUUSD',executable:false,executionAllowed:false,signal:'WAIT',setups:[],error:e.message});}
 });
-app.get('/master/status',(req,res)=>res.json({success:true,strategy:'MASTER_XAUUSD',status:'RUNNING',lastScan:masterLastScan,lastError:masterLastError,rr:'1:3',riskCapPercent:1}));
+app.get('/master/status',(req,res)=>res.json({success:true,strategy:'MASTER_XAUUSD',status:'RUNNING',lastScan:masterLastScan,lastError:masterLastError,rr:'SETUP_SPECIFIC',riskCapPercent:1,trailingPolicy:'BE at +1R, then +0.5R lock per +0.5R'}));
 app.get('/health',(req,res)=>res.json({success:true,instrument:OUTPUT_SYMBOL,strategies:['STRATEGY_5','MASTER_XAUUSD'],p78:false}));
 app.get('/status',(req,res)=>res.json({success:true,instrument:OUTPUT_SYMBOL,strategies:{strategy5:'RUNNING',master:'RUNNING',p78:'REMOVED'},lastError,masterLastError}));
 
