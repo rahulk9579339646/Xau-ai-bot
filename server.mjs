@@ -16,8 +16,6 @@
 
 import express from "express";
 import WebSocket from "ws";
-import fs from "node:fs/promises";
-import path from "node:path";
 
 const app = express();
 app.use(express.json());
@@ -985,96 +983,6 @@ async function sendTelegramRaw(message) {
 
 
 /* =========================================================
-   MASTER TRADE HISTORY + IST DAILY TELEGRAM REPORT
-   For durable history on Render, set MASTER_HISTORY_FILE=/var/data/master-trade-history.json
-   and attach a Render persistent disk mounted at /var/data.
-   ========================================================= */
-const MASTER_HISTORY_FILE = process.env.MASTER_HISTORY_FILE || path.join(process.cwd(), "master-trade-history.json");
-let masterHistory = [];
-let masterHistoryReady = false;
-let lastMasterReportDay = "";
-let masterHistoryWrite = Promise.resolve();
-function istDayKey(date = new Date()) {
-  return new Intl.DateTimeFormat("en-CA", {timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).format(date);
-}
-function istPreviousDayKey(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-CA", {timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(date);
-  const y=Number(parts.find(p=>p.type==="year").value),m=Number(parts.find(p=>p.type==="month").value),d=Number(parts.find(p=>p.type==="day").value);
-  return istDayKey(new Date(Date.UTC(y,m-1,d)-86400000));
-}
-async function loadMasterHistory() {
-  try {
-    const raw=await fs.readFile(MASTER_HISTORY_FILE,"utf8");
-    const parsed=JSON.parse(raw); masterHistory=Array.isArray(parsed)?parsed:[];
-  } catch(e) {
-    if(e.code!=="ENOENT") console.error("Master history read error:",e.message);
-    masterHistory=[];
-  }
-  masterHistoryReady=true;
-}
-function persistMasterHistory() {
-  masterHistoryWrite=masterHistoryWrite.then(async()=>{
-    await fs.mkdir(path.dirname(MASTER_HISTORY_FILE),{recursive:true});
-    const tmp=MASTER_HISTORY_FILE+".tmp";
-    await fs.writeFile(tmp,JSON.stringify(masterHistory,null,2),"utf8");
-    await fs.rename(tmp,MASTER_HISTORY_FILE);
-  }).catch(e=>console.error("Master history write error:",e.message));
-  return masterHistoryWrite;
-}
-function masterPnlNumber(v) { const n=Number(v); return Number.isFinite(n)?n:null; }
-async function sendMasterDailyReport(dayKey) {
-  if(!masterHistoryReady) await loadMasterHistory();
-  const rows=masterHistory.filter(t=>String(t.closedAt||"").startsWith(dayKey));
-  const groups=new Map();
-  for(const t of rows){
-    const name=String(t.pattern||t.setupId||"UNKNOWN");
-    if(!groups.has(name))groups.set(name,{trades:0,wins:0,losses:0,pnl:0,knownPnl:0});
-    const g=groups.get(name);g.trades++;
-    if(String(t.result).toUpperCase()==="WIN")g.wins++;else if(String(t.result).toUpperCase()==="LOSS")g.losses++;
-    const pnl=masterPnlNumber(t.pnl);if(pnl!==null){g.pnl+=pnl;g.knownPnl++;}
-  }
-  const lines=["📊 XAUUSD MASTER — DAILY REPORT",`Date (IST): ${dayKey}`,`Closed trades: ${rows.length}`,""];
-  if(!groups.size) lines.push("No Master trades closed on this date.");
-  for(const [name,g] of [...groups.entries()].sort((a,b)=>b[1].trades-a[1].trades)){
-    const rate=g.trades?((g.wins/g.trades)*100).toFixed(1):"0.0";
-    lines.push(`• ${name}`,`  Trades: ${g.trades} | WIN: ${g.wins} | LOSS: ${g.losses} | Win rate: ${rate}%`,
-      `  Actual P&L: ${g.knownPnl===g.trades?g.pnl.toFixed(2):"PARTIAL — " + g.pnl.toFixed(2)}${g.knownPnl<g.trades?` (${g.knownPnl}/${g.trades} P&L values received)`:""}`,"");
-  }
-  lines.push("━━━━━━━━━━━━━━━━━━━━");
-  if(!TELEGRAM_BOT_TOKEN||!TELEGRAM_CHAT_ID){console.error("Master daily report skipped: Telegram not configured");return;}
-  const r=await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:TELEGRAM_CHAT_ID,text:lines.join("\n")})});
-  const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.description||"Telegram report failed");
-}
-app.post("/master/trade-closed", auth, async (req,res)=>{
-  try {
-    if(!masterHistoryReady) await loadMasterHistory();
-    const b=req.body||{};
-    const orderId=String(b.orderId||"");
-    if(!orderId) return res.status(400).json({success:false,error:"orderId is required"});
-    if(masterHistory.some(t=>String(t.orderId)===orderId)) return res.json({success:true,duplicate:true});
-    const pnl=masterPnlNumber(b.pnl);
-    const result=String(b.result|| (pnl===null?"UNKNOWN":pnl>=0?"WIN":"LOSS")).toUpperCase();
-    const row={orderId,setupId:String(b.setupId||"UNKNOWN"),pattern:String(b.pattern||b.setupId||"UNKNOWN"),direction:String(b.direction||"UNKNOWN"),entry:masterPnlNumber(b.entry),lots:masterPnlNumber(b.lots),result,pnl,openedAt:b.openedAt||null,closedAt:b.closedAt||new Date().toISOString(),source:"LIQUID_CHART"};
-    masterHistory.push(row);await persistMasterHistory();
-    res.json({success:true,saved:true,trade:row});
-  } catch(e) { res.status(500).json({success:false,error:e.message}); }
-});
-app.get("/master/history", auth, async (_req,res)=>{if(!masterHistoryReady)await loadMasterHistory();res.json({success:true,count:masterHistory.length,trades:masterHistory});});
-setInterval(async()=>{
-  try {
-    const now=new Date();
-    const parts=new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Kolkata",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(now);
-    const hour=parts.find(p=>p.type==="hour")?.value,minute=parts.find(p=>p.type==="minute")?.value;
-    const today=istDayKey(now);
-    if(hour==="00"&&minute==="00"&&lastMasterReportDay!==today){
-      lastMasterReportDay=today;
-      await sendMasterDailyReport(istPreviousDayKey(now));
-    }
-  } catch(e) { console.error("Master daily report error:",e.message); }
-},15000);
-loadMasterHistory().catch(e=>console.error("Master history init error:",e.message));
-
-/* =========================================================
    SECTION 8B — MASTER PATTERN SIGNAL ENGINE
    Only the selected profitable candlestick patterns plus Hammer are enabled.
    All other candlestick patterns are filtered out. Chart/structure modules
@@ -1462,17 +1370,12 @@ async function masterScan(){
  mDetectCandles(m5,atr,raw);mDetectStructure(m5,atr,raw);mDetectCharts(m5,atr,raw);
  const seen=new Set(),setups=[];
  for(const s of raw){if(seen.has(s.signalKey))continue;seen.add(s.signalKey);setups.push({...s,instrument:OUTPUT_SYMBOL,timeframe:'5M',candleTime:last(m5).time});}
- const recent=m5.slice(-80,-1);
- const confirmed=mPivots(m5.slice(0,-1),3,3);
- const swingHigh=last(confirmed.highs)?.p ?? (recent.length?Math.max(...recent.map(c=>c.high)):null);
- const swingLow=last(confirmed.lows)?.p ?? (recent.length?Math.min(...recent.map(c=>c.low)):null);
- const marketStructure={swingHigh,swingLow,updatedAt:last(m5).time};
- masterLastScan={generatedAt:new Date().toISOString(),closedCandleTime:last(m5).time,count:setups.length,setups,marketStructure};
+ masterLastScan={generatedAt:new Date().toISOString(),closedCandleTime:last(m5).time,count:setups.length,setups};
  masterLastError=null;
  return {success:true,strategy:'MASTER_XAUUSD',instrument:OUTPUT_SYMBOL,generatedAt:masterLastScan.generatedAt,closedCandleTime:last(m5).time,
    timeframes:{D1:last(d1)?.close??null,H1:last(h1)?.close??null,M15:last(m15)?.close??null,M5:last(m5)?.close??null},rr:'1:3',maxRiskPercent:1,
    confirmationPolicy:{closedCandlesOnly:true,reversalNeedsConfirmedLocation:true,breakoutsNeedStrongClose:true,slBeyondSignalExtreme:true,complexChartPatternsAreHeuristic:true},
-   executable:setups.length>0,executionAllowed:LIQUID_AUTO_TRADE&&setups.length>0,signal:setups.length?'MULTIPLE_SETUPS':'WAIT',setups,marketStructure,
+   executable:setups.length>0,executionAllowed:LIQUID_AUTO_TRADE&&setups.length>0,signal:setups.length?'MULTIPLE_SETUPS':'WAIT',setups,
    rrPolicy:{candlestickReversal:'1:2',candlestickContinuation:'1:3',chartReversal:'1:2.5',chartContinuation:'1:3',orb:'1:2',liquidityOrderBlockFVG:'1:2',marketStructureTrend:'1:3'},
    trailingPolicy:'At +1R SL to breakeven; thereafter each +0.5R in open profit advances SL by +0.5R',
    note:'Independent heuristic setup modules; all signals use closed candles. Complex chart formations are approximations and require backtesting before live use.'};
