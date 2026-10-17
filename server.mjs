@@ -33,6 +33,7 @@ const TELEGRAM_BOT_TOKEN=process.env.TELEGRAM_BOT_TOKEN||"";
 const TELEGRAM_CHAT_ID=process.env.TELEGRAM_CHAT_ID||"";
 const LIQUID_AUTO_TRADE=String(process.env.LIQUID_AUTO_TRADE||"false").toLowerCase()==="true";
 const HF_SECRET=process.env.HF_SECRET||"";
+const GOOGLE_SHEETS_WEBHOOK_URL=process.env.GOOGLE_SHEETS_WEBHOOK_URL||"";
 const SYMBOL="XAU/USD";
 const OUTPUT_SYMBOL="XAUUSD";
 const TF={"1H":"1h","15M":"15min","5M":"5min"};
@@ -40,6 +41,206 @@ const CACHE=new Map();
 const CACHE_MS=3000;
 let lastScan=null,lastSignalKey=null,lastTelegram=null,lastError=null;
 const telegramEnabledByStrategy = { strategy5: true, p78: true, orderflow: true };
+
+// Closed-trade reporting is grouped by India-local date (IST). In-memory only:
+// reports reset if the Render service process is redeployed/restarted.
+const dailyTradeReports = [];
+const dailyTradeReportIds = new Set();
+function istDateKey(value = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(value);
+  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day}`;
+}
+function reportCategoryForPattern(pattern, supplied = "") {
+  if (supplied) return String(supplied).slice(0, 80);
+  const p = String(pattern || "").toUpperCase();
+  if (p.startsWith("CANDLE_")) return "Candlestick";
+  if (p.startsWith("CHART_")) return "Chart Pattern";
+  if (p.startsWith("STRUCTURE_")) return "Market Structure";
+  if (/P78/i.test(p)) return "P78";
+  if (/ORDER.?FLOW/i.test(p)) return "Order Flow";
+  if (/SUPPORT|RESISTANCE|S\/R/i.test(p)) return "Support/Resistance";
+  return "Other Strategy";
+}
+function cleanReportNumber(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function addClosedTradeReport(body = {}) {
+  const tradeId = String(body.tradeId || "").trim();
+  if (!tradeId) throw new Error("tradeId is required for duplicate protection");
+  if (dailyTradeReportIds.has(tradeId)) return { duplicate: true, tradeId };
+  const result = String(body.result || "UNKNOWN").toUpperCase();
+  if (!["WIN", "LOSS", "BE", "UNKNOWN"].includes(result)) throw new Error("result must be WIN, LOSS, BE, or UNKNOWN");
+  const closedAtRaw = body.closedAt ? new Date(body.closedAt) : new Date();
+  const closedAt = Number.isFinite(closedAtRaw.getTime()) ? closedAtRaw.toISOString() : new Date().toISOString();
+  const pattern = String(body.pattern || body.setupId || body.strategy || "Unknown pattern").slice(0, 120);
+  const record = {
+    tradeId,
+    strategy: String(body.strategy || "Unknown strategy").slice(0, 80),
+    category: reportCategoryForPattern(pattern, body.category),
+    pattern,
+    direction: String(body.direction || "-").slice(0, 8),
+    result,
+    pnl: cleanReportNumber(body.pnl),
+    lots: cleanReportNumber(body.lots),
+    entry: cleanReportNumber(body.entry),
+    exit: cleanReportNumber(body.exit),
+    stopLoss: cleanReportNumber(body.stopLoss),
+    takeProfit: cleanReportNumber(body.takeProfit),
+    openedAt: body.openedAt ? String(body.openedAt) : null,
+    closedAt,
+    dateIST: istDateKey(new Date(closedAt))
+  };
+  dailyTradeReportIds.add(tradeId);
+  dailyTradeReports.push(record);
+  // Persist every newly accepted closed trade to the configured Google Sheets Apps Script.
+  // This runs asynchronously so a Sheets outage does not block trade reporting or strategy logic.
+  void sendGoogleSheetsTrade(record);
+  // Keep a reasonable in-memory ceiling; current-day records are always retained.
+  if (dailyTradeReports.length > 10000) {
+    const removed = dailyTradeReports.splice(0, dailyTradeReports.length - 8000);
+    for (const old of removed) dailyTradeReportIds.delete(old.tradeId);
+  }
+  return { duplicate: false, record };
+}
+async function sendGoogleSheetsTrade(record) {
+  if (!GOOGLE_SHEETS_WEBHOOK_URL) return;
+  const entry = cleanReportNumber(record.entry);
+  const sl = cleanReportNumber(record.stopLoss);
+  const tp = cleanReportNumber(record.takeProfit);
+  const risk = entry !== null && sl !== null ? Math.abs(entry - sl) : 0;
+  const reward = entry !== null && tp !== null ? Math.abs(tp - entry) : 0;
+  const payload = {
+    tradeId: record.tradeId,
+    timestamp: record.closedAt,
+    strategy: record.strategy,
+    category: record.category,
+    pattern: record.pattern,
+    symbol: "XAUUSD",
+    side: record.direction,
+    entry,
+    sl,
+    tp,
+    result: record.result,
+    profitLoss: record.pnl,
+    riskReward: risk > 0 && reward > 0 ? Number((reward / risk).toFixed(4)) : "",
+    lots: record.lots,
+    exit: record.exit,
+    openedAt: record.openedAt,
+    closedAt: record.closedAt
+  };
+  try {
+    const response = await fetch(GOOGLE_SHEETS_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const responseText = await response.text();
+    let result = null;
+    try { result = JSON.parse(responseText); } catch {}
+    if (!response.ok || (result && result.success === false)) {
+      console.error("Google Sheets trade save failed:", response.status, responseText.slice(0, 300));
+      return;
+    }
+    console.log("Google Sheets trade saved:", record.tradeId);
+  } catch (error) {
+    console.error("Google Sheets trade save error:", String(error?.message || error));
+  }
+}
+
+function summarizeTradeRecords(records) {
+  const wins = records.filter(x => x.result === "WIN").length;
+  const losses = records.filter(x => x.result === "LOSS").length;
+  const breakeven = records.filter(x => x.result === "BE").length;
+  const unknown = records.filter(x => x.result === "UNKNOWN").length;
+  const knownPnl = records.filter(x => Number.isFinite(x.pnl));
+  const grossProfit = knownPnl.reduce((s, x) => s + Math.max(0, x.pnl), 0);
+  const grossLoss = knownPnl.reduce((s, x) => s + Math.min(0, x.pnl), 0);
+  const net = grossProfit + grossLoss;
+  const resolved = wins + losses;
+  return { trades: records.length, wins, losses, breakeven, unknown,
+    winRate: resolved ? wins / resolved * 100 : null,
+    grossProfit, grossLoss, net, pnlKnown: knownPnl.length };
+}
+function fmtMoney(v) {
+  if (!Number.isFinite(v)) return "N/A";
+  return (v > 0 ? "+" : "") + v.toFixed(2);
+}
+function makeDailyReport(dateKey = istDateKey()) {
+  const rows = dailyTradeReports.filter(x => x.dateIST === dateKey);
+  const all = summarizeTradeRecords(rows);
+  const lines = [
+    "📊 XAUUSD DAILY TRADING REPORT",
+    `Date: ${dateKey} (IST)`,
+    "━━━━━━━━━━━━━━━━━━━━",
+    `TOTAL: ${all.trades} trades | W ${all.wins} | L ${all.losses} | BE ${all.breakeven} | Unknown ${all.unknown}`,
+    `Win Rate: ${all.winRate === null ? "N/A" : all.winRate.toFixed(2) + "%"}`,
+    `Gross Profit: ${fmtMoney(all.grossProfit)} | Gross Loss: ${fmtMoney(all.grossLoss)} | Net: ${fmtMoney(all.net)}`,
+    `PnL recorded: ${all.pnlKnown}/${all.trades} trades`,
+    "━━━━━━━━━━━━━━━━━━━━"
+  ];
+  if (!rows.length) {
+    lines.push("No closed-trade results were reported today.", "Ensure each Liquid Chart executor sends closed trades to /report/trade.");
+    return lines.join("\n");
+  }
+  const categories = new Map();
+  for (const r of rows) {
+    const key = r.category;
+    if (!categories.has(key)) categories.set(key, []);
+    categories.get(key).push(r);
+  }
+  lines.push("BY CATEGORY");
+  for (const [category, group] of categories) {
+    const s = summarizeTradeRecords(group);
+    lines.push(`${category}: ${s.trades} trades | W${s.wins}/L${s.losses}/BE${s.breakeven}/?${s.unknown} | WR ${s.winRate === null ? "N/A" : s.winRate.toFixed(1) + "%"} | Net ${fmtMoney(s.net)}`);
+  }
+  lines.push("━━━━━━━━━━━━━━━━━━━━", "BY STRATEGY / PATTERN");
+  const patterns = new Map();
+  for (const r of rows) {
+    const key = `${r.strategy} — ${r.pattern}`;
+    if (!patterns.has(key)) patterns.set(key, []);
+    patterns.get(key).push(r);
+  }
+  for (const [name, group] of patterns) {
+    const s = summarizeTradeRecords(group);
+    lines.push(`${name}: ${s.trades}T | W${s.wins} L${s.losses} BE${s.breakeven} ?${s.unknown} | WR ${s.winRate === null ? "N/A" : s.winRate.toFixed(1) + "%"} | GP ${fmtMoney(s.grossProfit)} | GL ${fmtMoney(s.grossLoss)} | Net ${fmtMoney(s.net)}`);
+  }
+  lines.push("━━━━━━━━━━━━━━━━━━━━", "PnL is based only on profit values received from the executor. Missing PnL is not guessed.");
+  return lines.join("\n");
+}
+async function sendDailyTradeReport() {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.error("Daily Telegram report skipped: Telegram not configured");
+    return;
+  }
+  const report = makeDailyReport(istDateKey());
+  const lines = report.split("\n");
+  let chunk = "";
+  for (const line of lines) {
+    if ((chunk + "\n" + line).length > 3500) {
+      await sendTelegramRaw(chunk);
+      chunk = line;
+    } else chunk = chunk ? chunk + "\n" + line : line;
+  }
+  if (chunk) await sendTelegramRaw(chunk);
+}
+function scheduleDailyTradeReport() {
+  const now = Date.now();
+  // India has no daylight-saving changes: IST is UTC+05:30.
+  const istNow = new Date(now + 330 * 60 * 1000);
+  let targetLocalUtc = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(), 22, 0, 0, 0);
+  let targetEpoch = targetLocalUtc - 330 * 60 * 1000;
+  if (targetEpoch <= now) targetEpoch += 24 * 60 * 60 * 1000;
+  setTimeout(async () => {
+    try { await sendDailyTradeReport(); }
+    catch (e) { console.error("Daily report error:", e.message); }
+    scheduleDailyTradeReport();
+  }, Math.max(1000, targetEpoch - now));
+}
 
 function num(v,d=null){const n=Number(v);return Number.isFinite(n)?n:d;}
 function round(v,d=5){return Number.isFinite(v)?Math.round(v*10**d)/10**d:null;}
@@ -909,11 +1110,38 @@ app.post("/risk/:strategy/result", (req,res) => {
   const strategy=String(req.params.strategy||"").toLowerCase();
   try {
     const result=applyTradeResult(strategy,req.body?.result,req.body?.pnl);
+    const labels = { strategy5: "Strategy #5", p78: "P78", orderflow: "Order Flow" };
+    const closedAt = req.body?.closedAt || new Date().toISOString();
+    addClosedTradeReport({
+      tradeId: String(req.body?.tradeId || req.body?.orderId || `${strategy}:${closedAt}:${req.body?.result}:${req.body?.pnl ?? "na"}`),
+      strategy: req.body?.strategyName || labels[strategy] || strategy,
+      category: req.body?.category || reportCategoryForPattern(req.body?.pattern || req.body?.setupId || labels[strategy] || strategy),
+      pattern: req.body?.pattern || req.body?.setupId || labels[strategy] || strategy,
+      direction: req.body?.direction, result: req.body?.result, pnl: req.body?.pnl,
+      lots: req.body?.lots, entry: req.body?.entry, exit: req.body?.exit,
+      stopLoss: req.body?.stopLoss, takeProfit: req.body?.takeProfit,
+      openedAt: req.body?.openedAt, closedAt
+    });
     res.json({success:true,...result,lotBook:lotBookOutput()});
   } catch(e) {
     res.status(400).json({success:false,error:e.message});
   }
 });
+// Receives one closed trade from a Liquid Chart executor; report-only endpoint.
+app.post("/report/trade", auth, (req, res) => {
+  try {
+    const result = addClosedTradeReport(req.body || {});
+    res.json({ success: true, ...result, todayIST: istDateKey(), todayTrades: dailyTradeReports.filter(x => x.dateIST === istDateKey()).length });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+app.get("/report/status", auth, (req, res) => {
+  const date = istDateKey();
+  const records = dailyTradeReports.filter(x => x.dateIST === date);
+  res.json({ success: true, dateIST: date, ...summarizeTradeRecords(records), records });
+});
+
 app.get("/risk/status", (req,res) => res.json({
   success:true,lotStep:LOT_STEP,winMultiplier:LOT_WIN_MULTIPLIER,lossMultiplier:LOT_LOSS_MULTIPLIER,
   minLot:LOT_MIN,maxLot:LOT_MAX,strategies:lotBookOutput()
@@ -1125,7 +1353,7 @@ function mEmit(out,id,side,c,atr,reason,slOverride=null){
   out.push({setupId:id,signalKey:key,strategy:id,direction:side,signal:side,executable:true,executionAllowed:true,
     candleTime:x.time,entry:round(entry),sl:round(sl),tp:round(tp),rr,rrText:'1:'+rr,reason,
     stopRule:mRiskRuleFor(id),takeProfitRule:'Entry-to-SL risk multiplied by '+rr,
-    trailingRule:'At +1R move SL to breakeven; then each additional +0.5R locks another +0.5R',
+    trailingRule:'At +0.5R move SL to breakeven; at +1R lock +0.5R; then each additional +0.5R locks another +0.5R',
     confirmation:{closedCandle:true,breakoutClose:isBreak,locationRequired:reversal,slBeyondSignalExtreme:true,rr}});
 }
 
@@ -1377,7 +1605,7 @@ async function masterScan(){
    confirmationPolicy:{closedCandlesOnly:true,reversalNeedsConfirmedLocation:true,breakoutsNeedStrongClose:true,slBeyondSignalExtreme:true,complexChartPatternsAreHeuristic:true},
    executable:setups.length>0,executionAllowed:LIQUID_AUTO_TRADE&&setups.length>0,signal:setups.length?'MULTIPLE_SETUPS':'WAIT',setups,
    rrPolicy:{candlestickReversal:'1:2',candlestickContinuation:'1:3',chartReversal:'1:2.5',chartContinuation:'1:3',orb:'1:2',liquidityOrderBlockFVG:'1:2',marketStructureTrend:'1:3'},
-   trailingPolicy:'At +1R SL to breakeven; thereafter each +0.5R in open profit advances SL by +0.5R',
+   trailingPolicy:'At +0.5R SL to breakeven; at +1R lock +0.5R; thereafter each additional +0.5R locks another +0.5R',
    note:'Independent heuristic setup modules; all signals use closed candles. Complex chart formations are approximations and require backtesting before live use.'};
 }
 
@@ -1406,7 +1634,7 @@ app.get("/", (req,res) => res.json({
     "/strategy5/decision","/strategy5/status","/p78/decision","/p78/status",
     "/orderflow/signal","/orderflow/execution-signal","/orderflow/status","/orderflow/footprint",
     "/master/decision","/master/status",
-    "/telegram/status","POST /telegram/:strategy","POST /risk/:strategy/result","/risk/status","/health"
+    "/telegram/status","POST /telegram/:strategy","POST /risk/:strategy/result","POST /report/trade","/report/status","/risk/status","/health"
   ]
 }));
 app.get("/health", (req,res) => res.json({
@@ -1423,6 +1651,7 @@ setInterval(scanStrategy5AndAlert, 30000);
 setInterval(scanAndAlert, 60000);
 setInterval(scanOrderFlowAndAlert, 5000);
 setInterval(pollTelegramCommands, 4000);
+scheduleDailyTradeReport();
 
 app.listen(PORT,"0.0.0.0",() => {
   console.log(`XAUUSD Three-Strategy Server listening on ${PORT}`);
