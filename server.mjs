@@ -198,15 +198,15 @@ async function p78Scan(){
     if(!rt.held || rt.index !== c5.length-1)continue;
     const risk=atr[k]*0.50,entry=s.Price;
     const sl=s.Direction==="BUY"?entry-risk:entry+risk;
-    const tp=s.Direction==="BUY"?entry+risk*1.5:entry-risk*1.5;
+    const tp=s.Direction==="BUY"?entry+risk*2.50:entry-risk*2.50;
     candidates.push({signal:s,k,entry,sl,tp,risk,score:mtf.score,mtfBreakdown:mtf.mtfBreakdown,strength:cs,retest:rt,retestTime:c5[rt.index].time,trendlineSource:"EXACT P78 BACKTEST ENGINE"});
   }
   candidates.sort((a,b)=>b.retest.index-a.retest.index);const x=candidates[0]||null;const current=last(c5)?.close??null;
-  if(x){x.entry=current;x.sl=x.signal.Direction==="BUY"?current-x.risk:current+x.risk;x.tp=x.signal.Direction==="BUY"?current+x.risk*1.5:current-x.risk*1.5;}
+  if(x){x.entry=current;x.sl=x.signal.Direction==="BUY"?current-x.risk:current+x.risk;x.tp=x.signal.Direction==="BUY"?current+x.risk*2.50:current-x.risk*2.50;}
   const signalKey=x?[x.signal.Direction,x.retestTime,round(x.entry),round(x.sl),round(x.tp)].join("|"):null;
   const signalConsumed=!!signalKey && consumedP78Signals.has(signalKey);
   const executable=!!x && !signalConsumed;
-  return{success:true,strategy:"P78",strategyName:"XAUUSD P78 — Exact Backtested Strategy",instrument:OUTPUT_SYMBOL,executionTimeframe:"5M",contextTimeframes:["1H","15M"],generatedAt:new Date().toISOString(),currentPrice:current,status:signalConsumed?"CONSUMED":(executable?"CONFIRMED":"WAITING"),executable,signalKey,signalConsumed,signal:x?{direction:x.signal.Direction,status:signalConsumed?"CONSUMED":"P78 CONFIRMED",score:x.score,maxScore:6,signalIndex:x.retest.index,signalTime:x.retestTime,candleStrength:x.strength.strength}: {direction:null,status:"WAITING",score:0,maxScore:6,signalTime:null},mtfBreakdown:x?.mtfBreakdown||null,tradeLevels:x?{entry:round(x.entry),stopLoss:round(x.sl),takeProfit:round(x.tp),risk:round(x.risk),rr:"1:1.5"}:null,components:x?{candleStrength:x.strength,mtfScore:x.score,mtfBreakdown:x.mtfBreakdown,retestHeld:x.retest,trendline:x.signal,continuation:"NOT USED"}:null,backtest:{trades:354,wins:277,losses:77,winRate:78.25,netR:255.40},note:"P78 = CandleStrength != Weak + MTF_Score >= 5 + RetestHeld. Only the latest closed retest-confirmation candle is executable; historical signals are not re-fired. Future 25-candle Continuation condition is NOT USED."};
+  return{success:true,strategy:"P78",strategyName:"XAUUSD P78 — Exact Backtested Strategy",instrument:OUTPUT_SYMBOL,executionTimeframe:"5M",contextTimeframes:["1H","15M"],generatedAt:new Date().toISOString(),currentPrice:current,status:signalConsumed?"CONSUMED":(executable?"CONFIRMED":"WAITING"),executable,signalKey,signalConsumed,signal:x?{direction:x.signal.Direction,status:signalConsumed?"CONSUMED":"P78 CONFIRMED",score:x.score,maxScore:6,signalIndex:x.retest.index,signalTime:x.retestTime,candleStrength:x.strength.strength}: {direction:null,status:"WAITING",score:0,maxScore:6,signalTime:null},mtfBreakdown:x?.mtfBreakdown||null,tradeLevels:x?{entry:round(x.entry),stopLoss:round(x.sl),takeProfit:round(x.tp),risk:round(x.risk),rr:"1:2.50"}:null,components:x?{candleStrength:x.strength,mtfScore:x.score,mtfBreakdown:x.mtfBreakdown,retestHeld:x.retest,trendline:x.signal,continuation:"NOT USED"}:null,backtest:{trades:354,wins:277,losses:77,winRate:78.25,netR:255.40},note:"P78 = CandleStrength != Weak + MTF_Score >= 5 + RetestHeld. Only the latest closed retest-confirmation candle is executable; historical signals are not re-fired. Future 25-candle Continuation condition is NOT USED."};
 }
 
 function telegramText(x){const s=x.signal||{},l=x.tradeLevels||{};return ["━━━━━━━━━━━━━━━━━━━━","🚨 XAUUSD P78 SIGNAL","━━━━━━━━━━━━━━━━━━━━",`Direction: ${s.direction||"WAIT"}`,`Status: ${s.status||"WAITING"}`,`MTF Score: ${s.score??0}/6`,`Current: ${x.currentPrice??"N/A"}`,"","TRADE LEVELS",`Entry: ${l.entry??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,`TP: ${l.takeProfit??"N/A"}`,"","Conditions","• CandleStrength != Weak","• MTF Score >= 5","• RetestHeld = TRUE","• Future 25-candle Continuation = NOT USED","","Backtest: 354 trades | 277W | 77L | 78.25% | +255.40R","━━━━━━━━━━━━━━━━━━━━"].join("\n");}
@@ -272,7 +272,7 @@ function strategy5ScanCandles(candles) {
       const risk = entry - sl;
       latestSignal = {
         index:k, time:c.time, direction:"BUY", entry, stopLoss:sl,
-        takeProfit:entry + risk * 1.5, support, resistance,
+        takeProfit:entry + risk * 2, support, resistance,
         rejection:"SUPPORT BULLISH REJECTION", atr:atr[k], risk
       };
       supportTested = true;
@@ -283,7 +283,7 @@ function strategy5ScanCandles(candles) {
       const risk = sl - entry;
       latestSignal = {
         index:k, time:c.time, direction:"SELL", entry, stopLoss:sl,
-        takeProfit:entry - risk * 1.5, support, resistance,
+        takeProfit:entry - risk * 2, support, resistance,
         rejection:"RESISTANCE BEARISH REJECTION", atr:atr[k], risk
       };
       resistanceTested = true;
@@ -313,7 +313,7 @@ function strategy5ScanCandles(candles) {
       entry:round(active.entry),
       stopLoss:round(active.stopLoss),
       takeProfit:round(active.takeProfit),
-      risk:round(active.risk), rr:"1:1.5"
+      risk:round(active.risk), rr:"1:2"
     } : null,
     components:{
       support:support === null ? null : round(support),
@@ -326,7 +326,7 @@ function strategy5ScanCandles(candles) {
       toleranceATR:toleranceAtr,
       tested:{support:supportTested,resistance:resistanceTested}
     },
-    note:"Strategy #5 only: 3/3 swing levels, rejection candle, ATR(14) SMA, 0.25 ATR tolerance, minimum 1 ATR SL, TP 1.5R. No P78 conditions."
+    note:"Strategy #5 only: 3/3 swing levels, rejection candle, ATR(14) SMA, 0.25 ATR tolerance, minimum 1 ATR SL, TP 2R. No P78 conditions."
   };
 }
 
@@ -407,7 +407,7 @@ const DRY_RUN = String(process.env.DRY_RUN ?? String(!LIQUID_AUTO_TRADE)).toLowe
 const EXECUTION_SECRET = process.env.EXECUTION_SECRET || "";
 const LOTS = Number(process.env.LOTS || 0.05); // fallback only; live output uses independent compounding.
 const SL_BUFFER = Number(process.env.SL_BUFFER || 0.20);
-const TP_RR = 1.5;
+const TP_RR = Number(process.env.TP_RR || 1.25);
 const MIN_DELTA_PERCENT = Number(process.env.MIN_DELTA_PERCENT || 20);
 const ABSORPTION_RATIO = Number(process.env.ABSORPTION_RATIO || 1.20);
 
@@ -751,7 +751,7 @@ async function scanStrategy5AndAlert() {
           `Direction: ${s.direction || "WAIT"}`, `Status: ${s.status || "WAITING"}`,
           `Current: ${x.currentPrice ?? "N/A"}`, "", "TRADE LEVELS",
           `Entry: ${l.entry ?? "N/A"}`, `SL: ${l.stopLoss ?? "N/A"}`, `TP: ${l.takeProfit ?? "N/A"}`,
-          "", "Rules: Support/Resistance Rejection | RR 1:1.5", "━━━━━━━━━━━━━━━━━━━━"
+          "", "Rules: Support/Resistance Rejection | RR 1:2", "━━━━━━━━━━━━━━━━━━━━"
         ].join("\n");
         lastS5Alert = { ...(await sendTelegram("strategy5", message)), attemptedAt: new Date().toISOString(), signalKey: key };
         if (lastS5Alert.sent) lastS5SignalKey = key;
@@ -1053,18 +1053,29 @@ function mPivots(c,left=3,right=3){
   return {highs,lows};
 }
 function mRRFor(id){
- // All Master strategy setups use the requested fixed risk:reward of 1:1.5.
- return 1.5;
+ const s=String(id||'').toUpperCase();
+ if(s.includes('ORB'))return 2.0;
+ // Reversal chart formations use 1:2.5; continuation formations use 1:3.
+ if(/^CHART_/.test(s)&&/(DOUBLE_TOP|DOUBLE_BOTTOM|TRIPLE_TOP|TRIPLE_BOTTOM|HEAD_SHOULDERS|INVERSE_HEAD_SHOULDERS|ROUNDING_TOP|ROUNDING_BOTTOM)/.test(s))return 2.5;
+ // Liquidity, OB, mitigation and FVG setups use the zone-based 1:2 plan.
+ if(/LIQUIDITY|SWEEP|INDUCEMENT|ORDER_BLOCK|MITIGATION_BLOCK|BREAKER_BLOCK|FVG|FAIR_VALUE_GAP|IMBALANCE|DEMAND_RECLAIM|SUPPLY_REJECT/.test(s))return 2.0;
+ // Candlestick continuation families get 1:3; remaining candle patterns are reversals at 1:2.
+ if(/^CANDLE_/.test(s)){
+   if(/THREE_WHITE_SOLDIERS|THREE_BLACK_CROWS|RISING_THREE_METHODS|FALLING_THREE_METHODS|MAT_HOLD|TASUKI_GAP|THREE_LINE_STRIKE|MARUBOZU|INSIDE_BAR_.*BREAK|OUTSIDE_BAR_.*BREAK|SPINNING_TOP_.*BREAK/.test(s))return 3.0;
+   return 2.0;
+ }
+ if(/^CHART_/.test(s))return 3.0;
+ // Market structure and trend-following setups use 1:3.
+ return 3.0;
 }
 function mRiskRuleFor(id){
  const s=String(id||'').toUpperCase();
- let stopRule='SL beyond confirmed swing/structure invalidation';
- if(s.includes('ORB')) stopRule='SL beyond opposite opening-range boundary';
- else if(/^CANDLE_/.test(s)) stopRule='SL beyond pattern candle(s) extreme + ATR buffer';
- else if(/^CHART_/.test(s)&&/(DOUBLE_TOP|DOUBLE_BOTTOM|TRIPLE_TOP|TRIPLE_BOTTOM|HEAD_SHOULDERS|INVERSE_HEAD_SHOULDERS)/.test(s)) stopRule='SL beyond pattern shoulder/peak/trough';
- else if(/LIQUIDITY|SWEEP|INDUCEMENT|ORDER_BLOCK|MITIGATION_BLOCK|BREAKER_BLOCK|FVG|FAIR_VALUE_GAP|IMBALANCE/.test(s)) stopRule='SL beyond zone/sweep invalidation + ATR buffer';
- else if(/^CHART_/.test(s)) stopRule='SL beyond pattern structure/signal extreme';
- return stopRule+'; TP by 1:1.5 RR';
+ if(s.includes('ORB'))return 'SL beyond opposite opening-range boundary; TP by 1:2 RR';
+ if(/^CANDLE_/.test(s))return 'SL beyond pattern candle(s) extreme + ATR buffer; TP by family RR';
+ if(/^CHART_/.test(s)&&/(DOUBLE_TOP|DOUBLE_BOTTOM|TRIPLE_TOP|TRIPLE_BOTTOM|HEAD_SHOULDERS|INVERSE_HEAD_SHOULDERS)/.test(s))return 'SL beyond pattern shoulder/peak/trough; TP by 1:2.5 RR';
+ if(/LIQUIDITY|SWEEP|INDUCEMENT|ORDER_BLOCK|MITIGATION_BLOCK|BREAKER_BLOCK|FVG|FAIR_VALUE_GAP|IMBALANCE/.test(s))return 'SL beyond zone/sweep invalidation + ATR buffer; TP by 1:2 RR';
+ if(/^CHART_/.test(s))return 'SL beyond pattern structure/signal extreme; TP by 1:3 RR';
+ return 'SL beyond confirmed swing/structure invalidation; TP by 1:3 RR';
 }
 function mEmit(out,id,side,c,atr,reason,slOverride=null){
   // Only the selected profitable candlestick setups are allowed through.
@@ -1362,10 +1373,10 @@ async function masterScan(){
  masterLastScan={generatedAt:new Date().toISOString(),closedCandleTime:last(m5).time,count:setups.length,setups};
  masterLastError=null;
  return {success:true,strategy:'MASTER_XAUUSD',instrument:OUTPUT_SYMBOL,generatedAt:masterLastScan.generatedAt,closedCandleTime:last(m5).time,
-   timeframes:{D1:last(d1)?.close??null,H1:last(h1)?.close??null,M15:last(m15)?.close??null,M5:last(m5)?.close??null},rr:'1:1.5',maxRiskPercent:1,
+   timeframes:{D1:last(d1)?.close??null,H1:last(h1)?.close??null,M15:last(m15)?.close??null,M5:last(m5)?.close??null},rr:'1:3',maxRiskPercent:1,
    confirmationPolicy:{closedCandlesOnly:true,reversalNeedsConfirmedLocation:true,breakoutsNeedStrongClose:true,slBeyondSignalExtreme:true,complexChartPatternsAreHeuristic:true},
    executable:setups.length>0,executionAllowed:LIQUID_AUTO_TRADE&&setups.length>0,signal:setups.length?'MULTIPLE_SETUPS':'WAIT',setups,
-   rrPolicy:{allStrategies:'1:1.5'},
+   rrPolicy:{candlestickReversal:'1:2',candlestickContinuation:'1:3',chartReversal:'1:2.5',chartContinuation:'1:3',orb:'1:2',liquidityOrderBlockFVG:'1:2',marketStructureTrend:'1:3'},
    trailingPolicy:'At +1R SL to breakeven; thereafter each +0.5R in open profit advances SL by +0.5R',
    note:'Independent heuristic setup modules; all signals use closed candles. Complex chart formations are approximations and require backtesting before live use.'};
 }
