@@ -69,204 +69,62 @@ function cleanReportNumber(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
-
 function addClosedTradeReport(body = {}) {
-  const clean = (v) =>
-    v === undefined || v === null || String(v).trim() === ""
-      ? null
-      : v;
+  const tradeId = String(body.tradeId || "").trim();
+  if (!tradeId) throw new Error("tradeId is required for duplicate protection");
 
-  const isGeneric = (value, type) => {
-    const s = String(value || "").trim().toLowerCase();
-
-    if (type === "strategy") {
-      return !s ||
-        s === "unknown strategy" ||
-        s === "other xauusd bot" ||
-        s === "xauusd bot" ||
-        s === "unknown";
-    }
-
-    if (type === "pattern") {
-      return !s ||
-        s === "unknown pattern" ||
-        s === "unclassified xauusd trade" ||
-        s === "unclassified" ||
-        s === "unknown";
-    }
-
-    if (type === "category") {
-      return !s || s === "other" ||
-        s === "unknown" || s === "unclassified";
-    }
-
-    return !s;
-  };
-
-  const tradeId = String(
-    body.tradeId || body.orderId || ""
-  ).trim();
-
-  if (!tradeId) {
-    throw new Error("Missing tradeId/orderId");
+  const result = String(body.result || "UNKNOWN").toUpperCase();
+  if (!["WIN", "LOSS", "BE", "UNKNOWN"].includes(result)) {
+    throw new Error("result must be WIN, LOSS, BE, or UNKNOWN");
   }
-
-  const result = String(body.result || "UNKNOWN")
-    .trim()
-    .toUpperCase();
-
-  const validResults = [
-    "WIN", "LOSS", "BE", "BREAKEVEN",
-    "BREAK EVEN", "UNKNOWN"
-  ];
-
-  if (!validResults.includes(result)) {
-    throw new Error("Invalid trade result: " + result);
-  }
-
-  const incomingPattern = String(
-    body.pattern || body.setupId || body.strategy || ""
-  ).trim();
-
-  const incomingStrategy = String(
-    body.strategy || body.strategyName || ""
-  ).trim();
-
-  const incomingCategory = String(
-    body.category ||
-    reportCategoryForPattern(incomingPattern, "")
-  ).trim();
-
-  const existing = dailyTradeReports.find(
-    (r) => String(r.tradeId) === tradeId
-  );
-
-  const incoming = {
+  const pnl = cleanReportNumber(body.pnl);
+  const exit = cleanReportNumber(body.exit);
+  const closedAtRaw = body.closedAt ? new Date(body.closedAt) : new Date();
+  const closedAt = Number.isFinite(closedAtRaw.getTime())
+    ? closedAtRaw.toISOString() : new Date().toISOString();
+  const pattern = String(body.pattern || body.setupId || body.strategy || "Unknown pattern").slice(0, 120);
+  const record = {
     tradeId,
-    strategy: incomingStrategy || "Unknown strategy",
-    category: incomingCategory || "Other",
-    pattern: incomingPattern || "Unknown pattern",
-    direction: clean(body.direction),
+    strategy: String(body.strategy || "Unknown strategy").slice(0, 80),
+    category: reportCategoryForPattern(pattern, body.category),
+    pattern,
+    direction: String(body.direction || "-").slice(0, 8),
     result,
-    pnl: body.pnl === "" || body.pnl == null
-      ? null : Number(body.pnl),
-    lots: clean(body.lots),
-    entry: clean(body.entry),
-    exit: clean(body.exit),
-    stopLoss: clean(body.stopLoss ?? body.sl),
-    takeProfit: clean(body.takeProfit ?? body.tp),
-    openedAt: clean(body.openedAt),
-    closedAt: clean(body.closedAt) || new Date().toISOString(),
-    dateIST: istDateKey()
+    pnl,
+    lots: cleanReportNumber(body.lots),
+    entry: cleanReportNumber(body.entry),
+    exit,
+    stopLoss: cleanReportNumber(body.stopLoss),
+    takeProfit: cleanReportNumber(body.takeProfit),
+    openedAt: body.openedAt ? String(body.openedAt) : null,
+    closedAt,
+    dateIST: istDateKey(new Date(closedAt))
   };
 
-  if (existing) {
-    // Keep useful existing labels when incoming labels are generic.
-    const oldStrategy = existing.strategy;
-    const oldPattern = existing.pattern;
-    const oldCategory = existing.category;
-
-    const betterStrategy =
-      !isGeneric(incoming.strategy, "strategy");
-
-    const betterPattern =
-      !isGeneric(incoming.pattern, "pattern");
-
-    const betterCategory =
-      !isGeneric(incoming.category, "category");
-
-    let changed = false;
-
-    if (betterStrategy &&
-        (isGeneric(oldStrategy, "strategy") ||
-         oldStrategy !== incoming.strategy)) {
-      existing.strategy = incoming.strategy;
-      changed = true;
+  const existingIndex = dailyTradeReports.findIndex(x => x.tradeId === tradeId);
+  if (existingIndex >= 0) {
+    const old = dailyTradeReports[existingIndex];
+    // Permit an actual, complete close record to correct a prior UNKNOWN/incomplete record.
+    const incomingVerified = result !== "UNKNOWN" && pnl !== null && exit !== null;
+    const oldIncomplete = old.result === "UNKNOWN" || old.pnl === null || old.exit === null;
+    if (incomingVerified && oldIncomplete) {
+      dailyTradeReports[existingIndex] = record;
+      dailyTradeReportIds.add(tradeId);
+      void sendGoogleSheetsTrade(record);
+      console.log("Closed-trade report upgraded with verified close data:", tradeId, result, pnl, exit);
+      return { duplicate: false, updated: true, record };
     }
-
-    if (betterPattern &&
-        (isGeneric(oldPattern, "pattern") ||
-         oldPattern !== incoming.pattern)) {
-      existing.pattern = incoming.pattern;
-      changed = true;
-    }
-
-    if (betterCategory &&
-        (isGeneric(oldCategory, "category") ||
-         oldCategory !== incoming.category)) {
-      existing.category = incoming.category;
-      changed = true;
-    }
-
-    // Fill missing trade details without erasing valid existing values.
-    for (const key of [
-      "direction", "lots", "entry", "exit",
-      "stopLoss", "takeProfit", "openedAt", "closedAt"
-    ]) {
-      if (incoming[key] !== null &&
-          incoming[key] !== undefined &&
-          (existing[key] === null ||
-           existing[key] === undefined ||
-           existing[key] === "" ||
-           key === "exit" ||
-           key === "stopLoss" ||
-           key === "takeProfit")) {
-        if (String(existing[key] ?? "") !== String(incoming[key])) {
-          existing[key] = incoming[key];
-          changed = true;
-        }
-      }
-    }
-
-    // A later complete result can repair an incomplete earlier report.
-    if (incoming.result !== "UNKNOWN" &&
-        (existing.result === "UNKNOWN" ||
-         existing.result == null ||
-         existing.pnl == null ||
-         existing.exit == null)) {
-      existing.result = incoming.result;
-
-      if (incoming.pnl !== null && Number.isFinite(incoming.pnl)) {
-        existing.pnl = incoming.pnl;
-      }
-
-      changed = true;
-    }
-
-    if (changed) {
-      // Resend the corrected record to the Sheets webhook.
-      sendGoogleSheetsTrade(existing);
-
-      return {
-        saved: true,
-        upgraded: true,
-        duplicate: true,
-        record: existing
-      };
-    }
-
-    return {
-      saved: false,
-      duplicate: true,
-      upgraded: false,
-      record: existing
-    };
+    return { duplicate: true, tradeId, record: old };
   }
 
-  if (incoming.pnl !== null && !Number.isFinite(incoming.pnl)) {
-    incoming.pnl = null;
-  }
-
-  dailyTradeReports.push(incoming);
   dailyTradeReportIds.add(tradeId);
-
-  sendGoogleSheetsTrade(incoming);
-
-  return {
-    saved: true,
-    duplicate: false,
-    record: incoming
-  };
+  dailyTradeReports.push(record);
+  void sendGoogleSheetsTrade(record);
+  if (dailyTradeReports.length > 10000) {
+    const removed = dailyTradeReports.splice(0, dailyTradeReports.length - 8000);
+    for (const old of removed) dailyTradeReportIds.delete(old.tradeId);
+  }
+  return { duplicate: false, record };
 }
 async function sendGoogleSheetsTrade(record) {
   if (!GOOGLE_SHEETS_WEBHOOK_URL) return;
