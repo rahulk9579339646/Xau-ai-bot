@@ -72,11 +72,16 @@ function cleanReportNumber(v) {
 function addClosedTradeReport(body = {}) {
   const tradeId = String(body.tradeId || "").trim();
   if (!tradeId) throw new Error("tradeId is required for duplicate protection");
-  if (dailyTradeReportIds.has(tradeId)) return { duplicate: true, tradeId };
+
   const result = String(body.result || "UNKNOWN").toUpperCase();
-  if (!["WIN", "LOSS", "BE", "UNKNOWN"].includes(result)) throw new Error("result must be WIN, LOSS, BE, or UNKNOWN");
+  if (!["WIN", "LOSS", "BE", "UNKNOWN"].includes(result)) {
+    throw new Error("result must be WIN, LOSS, BE, or UNKNOWN");
+  }
+  const pnl = cleanReportNumber(body.pnl);
+  const exit = cleanReportNumber(body.exit);
   const closedAtRaw = body.closedAt ? new Date(body.closedAt) : new Date();
-  const closedAt = Number.isFinite(closedAtRaw.getTime()) ? closedAtRaw.toISOString() : new Date().toISOString();
+  const closedAt = Number.isFinite(closedAtRaw.getTime())
+    ? closedAtRaw.toISOString() : new Date().toISOString();
   const pattern = String(body.pattern || body.setupId || body.strategy || "Unknown pattern").slice(0, 120);
   const record = {
     tradeId,
@@ -85,22 +90,36 @@ function addClosedTradeReport(body = {}) {
     pattern,
     direction: String(body.direction || "-").slice(0, 8),
     result,
-    pnl: cleanReportNumber(body.pnl),
+    pnl,
     lots: cleanReportNumber(body.lots),
     entry: cleanReportNumber(body.entry),
-    exit: cleanReportNumber(body.exit),
+    exit,
     stopLoss: cleanReportNumber(body.stopLoss),
     takeProfit: cleanReportNumber(body.takeProfit),
     openedAt: body.openedAt ? String(body.openedAt) : null,
     closedAt,
     dateIST: istDateKey(new Date(closedAt))
   };
+
+  const existingIndex = dailyTradeReports.findIndex(x => x.tradeId === tradeId);
+  if (existingIndex >= 0) {
+    const old = dailyTradeReports[existingIndex];
+    // Permit an actual, complete close record to correct a prior UNKNOWN/incomplete record.
+    const incomingVerified = result !== "UNKNOWN" && pnl !== null && exit !== null;
+    const oldIncomplete = old.result === "UNKNOWN" || old.pnl === null || old.exit === null;
+    if (incomingVerified && oldIncomplete) {
+      dailyTradeReports[existingIndex] = record;
+      dailyTradeReportIds.add(tradeId);
+      void sendGoogleSheetsTrade(record);
+      console.log("Closed-trade report upgraded with verified close data:", tradeId, result, pnl, exit);
+      return { duplicate: false, updated: true, record };
+    }
+    return { duplicate: true, tradeId, record: old };
+  }
+
   dailyTradeReportIds.add(tradeId);
   dailyTradeReports.push(record);
-  // Persist every newly accepted closed trade to the configured Google Sheets Apps Script.
-  // This runs asynchronously so a Sheets outage does not block trade reporting or strategy logic.
   void sendGoogleSheetsTrade(record);
-  // Keep a reasonable in-memory ceiling; current-day records are always retained.
   if (dailyTradeReports.length > 10000) {
     const removed = dailyTradeReports.splice(0, dailyTradeReports.length - 8000);
     for (const old of removed) dailyTradeReportIds.delete(old.tradeId);
