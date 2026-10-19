@@ -1646,6 +1646,22 @@ app.get('/master/status', (req,res) => res.json({success:true,strategy:'MASTER_X
 /* =========================================================
    SECTION 9 — Common health/root routes and one server listener
    ========================================================= */
+// Public lightweight health/status route used by Render/UptimeRobot.
+// Never expose environment-variable values or secrets here.
+app.get("/status", (req,res) => res.json({
+  success:true,
+  status:"ok",
+  service:"XAUUSD Three-Strategy Signal Server + Master Pattern Engine",
+  uptimeSeconds:Math.floor(process.uptime()),
+  timestamp:new Date().toISOString(),
+  googleSheetsWebhookConfigured:Boolean(GOOGLE_SHEETS_WEBHOOK_URL),
+  telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
+  closedTradeReportsInMemory:dailyTradeReports.length,
+  todayIST:istDateKey(),
+  todayTradeReports:dailyTradeReports.filter(x => x.dateIST === istDateKey()).length,
+  note:"A closed trade reaches Google Sheets only if the Liquid executor POSTs it to /report/trade or /risk/:strategy/result. Reports are currently held in memory and reset on restart."
+}));
+
 app.get("/", (req,res) => res.json({
   success:true,service:"XAUUSD Three-Strategy Signal Server",port:PORT,
   strategies:["strategy5","p78","orderflow","master"],
@@ -1653,7 +1669,7 @@ app.get("/", (req,res) => res.json({
     "/strategy5/decision","/strategy5/status","/p78/decision","/p78/status",
     "/orderflow/signal","/orderflow/execution-signal","/orderflow/status","/orderflow/footprint",
     "/master/decision","/master/status",
-    "/telegram/status","POST /telegram/:strategy","POST /risk/:strategy/result","POST /report/trade","/report/status","/risk/status","/health"
+    "/status","/health","/telegram/status","POST /telegram/:strategy","POST /risk/:strategy/result","POST /report/trade","/report/status","/risk/status"
   ]
 }));
 app.get("/health", (req,res) => res.json({
