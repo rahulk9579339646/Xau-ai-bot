@@ -71,7 +71,8 @@ function cleanReportNumber(v) {
 }
 function normalizeReportStrategy(value) {
   const name = String(value || "Unknown strategy").trim();
-  if (/^strategy\s*#?\s*5$/i.test(name) || /^strategy_?5$/i.test(name)) return "Strategy 5";
+  // Accept the common Strategy 5 labels, including labels with a descriptive suffix.
+  if (/^strategy\s*#?\s*5(?:$|[\s_-])/i.test(name) || /^strategy_?5(?:$|[\s_-])/i.test(name)) return "Strategy 5";
   return name;
 }
 function addClosedTradeReport(body = {}) {
@@ -195,11 +196,11 @@ function fmtMoney(v) {
   return (v > 0 ? "+" : "") + v.toFixed(2);
 }
 function makeDailyReport(dateKey = istDateKey()) {
-  // The 10 PM Telegram report is intentionally Strategy 5 only.
-  const rows = dailyTradeReports.filter(x => x.dateIST === dateKey && x.strategy === "Strategy 5");
+  // Include every strategy, including Strategy 5 and Master, as in the original servermaster.mjs.
+  const rows = dailyTradeReports.filter(x => x.dateIST === dateKey);
   const all = summarizeTradeRecords(rows);
   const lines = [
-    "📊 XAUUSD STRATEGY 5 DAILY TRADING REPORT",
+    "📊 XAUUSD DAILY TRADING REPORT",
     `Date: ${dateKey} (IST)`,
     "━━━━━━━━━━━━━━━━━━━━",
     `TOTAL: ${all.trades} trades | W ${all.wins} | L ${all.losses} | BE ${all.breakeven} | Unknown ${all.unknown}`,
@@ -237,12 +238,12 @@ function makeDailyReport(dateKey = istDateKey()) {
   lines.push("━━━━━━━━━━━━━━━━━━━━", "PnL is based only on profit values received from the executor. Missing PnL is not guessed.");
   return lines.join("\n");
 }
-async function sendDailyTradeReport() {
+async function sendDailyTradeReport(dateKey = istDateKey()) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.error("Daily Telegram report skipped: Telegram not configured");
     return;
   }
-  const report = makeDailyReport(istDateKey());
+  const report = makeDailyReport(dateKey);
   const lines = report.split("\n");
   let chunk = "";
   for (const line of lines) {
@@ -253,16 +254,32 @@ async function sendDailyTradeReport() {
   }
   if (chunk) await sendTelegramRaw(chunk);
 }
+function previousISTDateKey(value = new Date()) {
+  const today = istDateKey(value);
+  const d = new Date(`${today}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
 function scheduleDailyTradeReport() {
   const now = Date.now();
   // India has no daylight-saving changes: IST is UTC+05:30.
   const istNow = new Date(now + 330 * 60 * 1000);
-  let targetLocalUtc = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(), 22, 0, 0, 0);
-  let targetEpoch = targetLocalUtc - 330 * 60 * 1000;
-  if (targetEpoch <= now) targetEpoch += 24 * 60 * 60 * 1000;
+  const currentHour = istNow.getUTCHours();
+  // Send at 10 PM IST, then again at midnight for the same completed IST date.
+  const targetHour = currentHour < 22 ? 22 : 0;
+  let targetLocalUtc = Date.UTC(
+    istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(),
+    targetHour, 0, 0, 0
+  );
+  if (targetHour === 0 || targetLocalUtc <= now + 330 * 60 * 1000) {
+    if (targetHour === 0) targetLocalUtc += 24 * 60 * 60 * 1000;
+  }
+  const targetEpoch = targetLocalUtc - 330 * 60 * 1000;
   setTimeout(async () => {
-    try { await sendDailyTradeReport(); }
-    catch (e) { console.error("Daily report error:", e.message); }
+    try {
+      const reportDate = targetHour === 0 ? previousISTDateKey() : istDateKey();
+      await sendDailyTradeReport(reportDate);
+    } catch (e) { console.error("Daily report error:", e.message); }
     scheduleDailyTradeReport();
   }, Math.max(1000, targetEpoch - now));
 }
@@ -1174,7 +1191,8 @@ app.get("/risk/status", (req,res) => res.json({
 
 /* =========================================================
    SECTION 8 — Telegram command controls
-   Commands: /start_s5 /stop_s5 /status_s5
+   Commands: /rahulreport
+             /start_s5 /stop_s5 /status_s5
              /start_p78 /stop_p78 /status_p78
              /start_orderflow /stop_orderflow /status_orderflow /status_all
    ========================================================= */
@@ -1192,7 +1210,12 @@ async function pollTelegramCommands() {
       telegramUpdateOffset=Math.max(telegramUpdateOffset,Number(update.update_id)+1);
       const message=update.message;
       if (!message?.text || String(message.chat?.id)!==String(TELEGRAM_CHAT_ID)) continue;
-      const command=message.text.trim().split(/\s+/)[0].toLowerCase();
+      const command=message.text.trim().split(/\s+/)[0].toLowerCase().split("@")[0];
+      if (command==="/rahulreport") {
+        await sendTelegramRaw("📊 तुमचा ताजा XAUUSD Master + सर्व Strategy चा रिपोर्ट तयार करत आहे...");
+        await sendDailyTradeReport(istDateKey());
+        continue;
+      }
       const controls={
         "/start_s5":["strategy5",true],"/stop_s5":["strategy5",false],
         "/start_p78":["p78",true],"/stop_p78":["p78",false],
