@@ -7,7 +7,7 @@
 
    Required packages: express, ws
    Required Render env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-   Optional: TWELVE_DATA_API_KEY, HF_SECRET, EXECUTION_SECRET, LIQUID_AUTO_TRADE, GOOGLE_SHEETS_READ_KEY
+   Optional: TWELVE_DATA_API_KEY, HF_SECRET, EXECUTION_SECRET, LIQUID_AUTO_TRADE
    Lot defaults: Strategy #5 0.01, P78 0.01, Order Flow 0.05.
    Report closed outcomes to POST /risk/{strategy}/result:
      {"result":"WIN","pnl":12.5} or {"result":"LOSS","pnl":-5}
@@ -34,7 +34,6 @@ const TELEGRAM_CHAT_ID=process.env.TELEGRAM_CHAT_ID||"";
 const LIQUID_AUTO_TRADE=String(process.env.LIQUID_AUTO_TRADE||"false").toLowerCase()==="true";
 const HF_SECRET=process.env.HF_SECRET||"";
 const GOOGLE_SHEETS_WEBHOOK_URL=process.env.GOOGLE_SHEETS_WEBHOOK_URL||"";
-const GOOGLE_SHEETS_READ_KEY=process.env.GOOGLE_SHEETS_READ_KEY||"";
 const SYMBOL="XAU/USD";
 const OUTPUT_SYMBOL="XAUUSD";
 const TF={"1H":"1h","15M":"15min","5M":"5min"};
@@ -70,52 +69,39 @@ function cleanReportNumber(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
-function isMissingReportText(value) {
-  const text = String(value ?? "").trim();
-  return !text || /^(undefined|null|n\/a|-)$/i.test(text);
-}
-function normalizeReportStrategy(value, category = "", pattern = "") {
-  const raw = isMissingReportText(value) ? "" : String(value).trim();
-  const p = `${category} ${pattern}`;
-  // Correct missing/undefined Strategy #5 metadata without altering Master labels.
-  if (/^strategy\s*#?\s*5(?:$|[\s_-])/i.test(raw) || /^strategy_?5(?:$|[\s_-])/i.test(raw)) return "Strategy 5";
-  if (!raw && /support\s*\/?\s*resistance|s\/r|rejection/i.test(p)) return "Strategy 5";
-  return raw || "Unknown strategy";
+function normalizeReportStrategy(value) {
+  const name = String(value || "Unknown strategy").trim();
+  // Accept the common Strategy 5 labels, including labels with a descriptive suffix.
+  if (/^strategy\s*#?\s*5(?:$|[\s_-])/i.test(name) || /^strategy_?5(?:$|[\s_-])/i.test(name)) return "Strategy 5";
+  return name;
 }
 function addClosedTradeReport(body = {}) {
-  const tradeId = String(body.tradeId || body.orderId || "").trim();
+  const tradeId = String(body.tradeId || "").trim();
   if (!tradeId) throw new Error("tradeId is required for duplicate protection");
 
-  const result = String(body.result || "UNKNOWN").trim().toUpperCase().replace(/[\s-]+/g, "_");
-  const normalizedResult = ["BREAKEVEN", "BREAK_EVEN", "BE"].includes(result) ? "BE" : result;
-  if (!["WIN", "LOSS", "BE", "UNKNOWN"].includes(normalizedResult)) {
+  const result = String(body.result || "UNKNOWN").toUpperCase();
+  if (!["WIN", "LOSS", "BE", "UNKNOWN"].includes(result)) {
     throw new Error("result must be WIN, LOSS, BE, or UNKNOWN");
   }
-  const pnl = cleanReportNumber(body.pnl ?? body.profitLoss);
-  const exit = cleanReportNumber(body.exit ?? body.closePrice);
+  const pnl = cleanReportNumber(body.pnl);
+  const exit = cleanReportNumber(body.exit);
   const closedAtRaw = body.closedAt ? new Date(body.closedAt) : new Date();
   const closedAt = Number.isFinite(closedAtRaw.getTime())
     ? closedAtRaw.toISOString() : new Date().toISOString();
-  const suppliedCategory = isMissingReportText(body.category) ? "" : String(body.category).trim();
-  let patternValue = body.pattern ?? body.setupId ?? body.setup ?? body.patternName ?? body.setupName ?? body.signalName ?? "";
-  if (isMissingReportText(patternValue)) patternValue = "";
-  let strategyValue = body.strategy ?? body.strategyName ?? body.strategyId ?? body.sourceStrategy ?? body.botName ?? "";
-  if (isMissingReportText(strategyValue)) strategyValue = "";
-  const strategy = normalizeReportStrategy(strategyValue, suppliedCategory, patternValue);
-  const pattern = String(patternValue || (strategy === "Strategy 5" ? "Support/Resistance Rejection" : strategy)).slice(0, 120);
+  const pattern = String(body.pattern || body.setupId || body.strategy || "Unknown pattern").slice(0, 120);
   const record = {
     tradeId,
-    strategy: strategy.slice(0, 80),
-    category: reportCategoryForPattern(pattern, suppliedCategory),
+    strategy: normalizeReportStrategy(body.strategy).slice(0, 80),
+    category: reportCategoryForPattern(pattern, body.category),
     pattern,
-    direction: String(body.direction || body.side || "-").slice(0, 8).toUpperCase(),
-    result: normalizedResult,
+    direction: String(body.direction || "-").slice(0, 8),
+    result,
     pnl,
     lots: cleanReportNumber(body.lots),
     entry: cleanReportNumber(body.entry),
     exit,
-    stopLoss: cleanReportNumber(body.stopLoss ?? body.sl),
-    takeProfit: cleanReportNumber(body.takeProfit ?? body.tp),
+    stopLoss: cleanReportNumber(body.stopLoss),
+    takeProfit: cleanReportNumber(body.takeProfit),
     openedAt: body.openedAt ? String(body.openedAt) : null,
     closedAt,
     dateIST: istDateKey(new Date(closedAt))
@@ -209,70 +195,9 @@ function fmtMoney(v) {
   if (!Number.isFinite(v)) return "N/A";
   return (v > 0 ? "+" : "") + v.toFixed(2);
 }
-function mapGoogleSheetTrade(row, dateKey, index) {
-  const timestamp = row.timestamp || row.closedAt || row.date || null;
-  const closedAtRaw = timestamp ? new Date(timestamp) : null;
-  const closedAt = closedAtRaw && Number.isFinite(closedAtRaw.getTime()) ? closedAtRaw.toISOString() : null;
-  const resultText = String(row.result || "UNKNOWN").trim().toUpperCase().replace(/[\s-]+/g, "_");
-  const result = ["BE", "BREAKEVEN", "BREAK_EVEN"].includes(resultText) ? "BE"
-    : ["WIN", "LOSS"].includes(resultText) ? resultText : "UNKNOWN";
-  const pnl = cleanReportNumber(row.profitLoss ?? row.pnl);
-  const strategyRaw = row.strategy ?? row.Strategy ?? "";
-  const patternRaw = row.pattern ?? row.Pattern ?? "";
-  const category = row.category || "";
-  const strategy = normalizeReportStrategy(strategyRaw, category, patternRaw);
-  const pattern = String(isMissingReportText(patternRaw)
-    ? (strategy === "Strategy 5" ? "Support/Resistance Rejection" : strategy)
-    : patternRaw).slice(0, 120);
-  return {
-    tradeId: String(row.tradeId || `${dateKey}:sheet:${index}`),
-    strategy,
-    category: reportCategoryForPattern(pattern, category),
-    pattern,
-    direction: String(row.side || row.direction || "-").toUpperCase(),
-    result,
-    pnl,
-    lots: cleanReportNumber(row.lots),
-    entry: cleanReportNumber(row.entry),
-    exit: cleanReportNumber(row.exit),
-    stopLoss: cleanReportNumber(row.sl ?? row.stopLoss),
-    takeProfit: cleanReportNumber(row.tp ?? row.takeProfit),
-    openedAt: row.openedAt || null,
-    closedAt,
-    dateIST: dateKey
-  };
-}
-async function getGoogleSheetsTrades(dateKey = istDateKey()) {
-  if (!GOOGLE_SHEETS_WEBHOOK_URL || !GOOGLE_SHEETS_READ_KEY) return null;
-  const url = new URL(GOOGLE_SHEETS_WEBHOOK_URL);
-  url.searchParams.set("action", "report");
-  url.searchParams.set("date", dateKey);
-  url.searchParams.set("key", GOOGLE_SHEETS_READ_KEY);
-  const response = await fetch(url.toString(), { method: "GET" });
-  const text = await response.text();
-  let payload;
-  try { payload = JSON.parse(text); }
-  catch { throw new Error(`Google Sheets read returned non-JSON response (HTTP ${response.status})`); }
-  if (!response.ok || payload.success !== true || !Array.isArray(payload.trades)) {
-    throw new Error(`Google Sheets read failed: ${payload.error || `HTTP ${response.status}`}`);
-  }
-  return payload.trades.map((row, index) => mapGoogleSheetTrade(row, dateKey, index));
-}
-async function getDailyReportRows(dateKey = istDateKey()) {
-  try {
-    const sheetRows = await getGoogleSheetsTrades(dateKey);
-    if (sheetRows !== null) {
-      console.log(`Daily report source: Google Sheets | date=${dateKey} | trades=${sheetRows.length}`);
-      return sheetRows;
-    }
-    console.warn("Google Sheets daily read is not configured; using in-memory closed-trade reports.");
-  } catch (error) {
-    console.error("Google Sheets daily read failed; using in-memory report fallback:", String(error?.message || error));
-  }
-  return dailyTradeReports.filter(x => x.dateIST === dateKey);
-}
-async function makeDailyReport(dateKey = istDateKey()) {
-  const rows = await getDailyReportRows(dateKey);
+function makeDailyReport(dateKey = istDateKey()) {
+  // Include every strategy, including Strategy 5 and Master, as in the original servermaster.mjs.
+  const rows = dailyTradeReports.filter(x => x.dateIST === dateKey);
   const all = summarizeTradeRecords(rows);
   const lines = [
     "📊 XAUUSD DAILY TRADING REPORT",
@@ -285,7 +210,7 @@ async function makeDailyReport(dateKey = istDateKey()) {
     "━━━━━━━━━━━━━━━━━━━━"
   ];
   if (!rows.length) {
-    lines.push("No closed-trade rows were found in Google Sheets for this date.", "Check GOOGLE_SHEETS_WEBHOOK_URL and GOOGLE_SHEETS_READ_KEY in Render.");
+    lines.push("No closed-trade results were reported today.", "Ensure each Liquid Chart executor sends closed trades to /report/trade.");
     return lines.join("\n");
   }
   const categories = new Map();
@@ -310,7 +235,7 @@ async function makeDailyReport(dateKey = istDateKey()) {
     const s = summarizeTradeRecords(group);
     lines.push(`${name}: ${s.trades}T | W${s.wins} L${s.losses} BE${s.breakeven} ?${s.unknown} | WR ${s.winRate === null ? "N/A" : s.winRate.toFixed(1) + "%"} | GP ${fmtMoney(s.grossProfit)} | GL ${fmtMoney(s.grossLoss)} | Net ${fmtMoney(s.net)}`);
   }
-  lines.push("━━━━━━━━━━━━━━━━━━━━", "Report source: Google Sheets rows for the selected IST date. PnL is taken only from recorded Profit/Loss values; missing PnL is not guessed.");
+  lines.push("━━━━━━━━━━━━━━━━━━━━", "PnL is based only on profit values received from the executor. Missing PnL is not guessed.");
   return lines.join("\n");
 }
 async function sendDailyTradeReport(dateKey = istDateKey()) {
@@ -318,7 +243,7 @@ async function sendDailyTradeReport(dateKey = istDateKey()) {
     console.error("Daily Telegram report skipped: Telegram not configured");
     return;
   }
-  const report = await makeDailyReport(dateKey);
+  const report = makeDailyReport(dateKey);
   const lines = report.split("\n");
   let chunk = "";
   for (const line of lines) {
@@ -1231,9 +1156,9 @@ app.post("/risk/:strategy/result", (req,res) => {
     const closedAt = req.body?.closedAt || new Date().toISOString();
     addClosedTradeReport({
       tradeId: String(req.body?.tradeId || req.body?.orderId || `${strategy}:${closedAt}:${req.body?.result}:${req.body?.pnl ?? "na"}`),
-      strategy: !isMissingReportText(req.body?.strategyName ?? req.body?.strategy) ? (req.body?.strategyName ?? req.body?.strategy) : (labels[strategy] || strategy),
-      category: !isMissingReportText(req.body?.category) ? req.body.category : reportCategoryForPattern(req.body?.pattern || req.body?.setupId || labels[strategy] || strategy),
-      pattern: !isMissingReportText(req.body?.pattern ?? req.body?.setupId) ? (req.body?.pattern ?? req.body?.setupId) : (labels[strategy] || strategy),
+      strategy: req.body?.strategyName || labels[strategy] || strategy,
+      category: req.body?.category || reportCategoryForPattern(req.body?.pattern || req.body?.setupId || labels[strategy] || strategy),
+      pattern: req.body?.pattern || req.body?.setupId || labels[strategy] || strategy,
       direction: req.body?.direction, result: req.body?.result, pnl: req.body?.pnl,
       lots: req.body?.lots, entry: req.body?.entry, exit: req.body?.exit,
       stopLoss: req.body?.stopLoss, takeProfit: req.body?.takeProfit,
@@ -1759,12 +1684,11 @@ app.get("/status", (req,res) => res.json({
   uptimeSeconds:Math.floor(process.uptime()),
   timestamp:new Date().toISOString(),
   googleSheetsWebhookConfigured:Boolean(GOOGLE_SHEETS_WEBHOOK_URL),
-  googleSheetsReadConfigured:Boolean(GOOGLE_SHEETS_WEBHOOK_URL && GOOGLE_SHEETS_READ_KEY),
   telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
   closedTradeReportsInMemory:dailyTradeReports.length,
   todayIST:istDateKey(),
   todayTradeReports:dailyTradeReports.filter(x => x.dateIST === istDateKey()).length,
-  note:"Closed trades are posted to Google Sheets by the reporting endpoint. Daily Telegram reports read Google Sheets when GOOGLE_SHEETS_READ_KEY is configured; in-memory records are only a fallback."
+  note:"A closed trade reaches Google Sheets only if the Liquid executor POSTs it to /report/trade or /risk/:strategy/result. Reports are currently held in memory and reset on restart."
 }));
 
 app.get("/", (req,res) => res.json({
