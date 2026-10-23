@@ -34,7 +34,6 @@ const TELEGRAM_CHAT_ID=process.env.TELEGRAM_CHAT_ID||"";
 const LIQUID_AUTO_TRADE=String(process.env.LIQUID_AUTO_TRADE||"false").toLowerCase()==="true";
 const HF_SECRET=process.env.HF_SECRET||"";
 const GOOGLE_SHEETS_WEBHOOK_URL=process.env.GOOGLE_SHEETS_WEBHOOK_URL||"";
-const GOOGLE_SHEETS_READ_KEY=process.env.GOOGLE_SHEETS_READ_KEY||"";
 const SYMBOL="XAU/USD";
 const OUTPUT_SYMBOL="XAUUSD";
 const TF={"1H":"1h","15M":"15min","5M":"5min"};
@@ -196,9 +195,9 @@ function fmtMoney(v) {
   if (!Number.isFinite(v)) return "N/A";
   return (v > 0 ? "+" : "") + v.toFixed(2);
 }
-function makeDailyReport(dateKey = istDateKey(), sourceRows = dailyTradeReports) {
-  // Include every strategy, including Strategy 5 and Master, from the supplied source rows.
-  const rows = sourceRows.filter(x => x.dateIST === dateKey);
+function makeDailyReport(dateKey = istDateKey()) {
+  // Include every strategy, including Strategy 5 and Master, as in the original servermaster.mjs.
+  const rows = dailyTradeReports.filter(x => x.dateIST === dateKey);
   const all = summarizeTradeRecords(rows);
   const lines = [
     "📊 XAUUSD DAILY TRADING REPORT",
@@ -239,59 +238,12 @@ function makeDailyReport(dateKey = istDateKey(), sourceRows = dailyTradeReports)
   lines.push("━━━━━━━━━━━━━━━━━━━━", "PnL is based only on profit values received from the executor. Missing PnL is not guessed.");
   return lines.join("\n");
 }
-async function fetchGoogleSheetsDailyTrades(dateKey) {
-  if (!GOOGLE_SHEETS_WEBHOOK_URL) throw new Error("GOOGLE_SHEETS_WEBHOOK_URL is not configured");
-  if (!GOOGLE_SHEETS_READ_KEY) throw new Error("GOOGLE_SHEETS_READ_KEY is not configured in Render");
-  const url = new URL(GOOGLE_SHEETS_WEBHOOK_URL);
-  url.searchParams.set("action", "report");
-  url.searchParams.set("date", dateKey);
-  url.searchParams.set("key", GOOGLE_SHEETS_READ_KEY);
-  const response = await fetch(url.toString(), { method: "GET" });
-  const bodyText = await response.text();
-  let data;
-  try { data = JSON.parse(bodyText); } catch { throw new Error("Google Sheets GET returned non-JSON response"); }
-  if (!response.ok || data.success !== true || !Array.isArray(data.trades)) {
-    throw new Error(data.error || `Google Sheets GET failed (${response.status})`);
-  }
-  return data.trades.map((x, i) => {
-    const closedAt = x.timestamp || x.closedAt || "";
-    const parsedDate = closedAt ? new Date(closedAt) : null;
-    const result = String(x.result || "UNKNOWN").trim().toUpperCase();
-    const pattern = String(x.pattern || "Unclassified XAUUSD trade");
-    return {
-      tradeId: String(x.tradeId || `sheet-${dateKey}-${i}`),
-      strategy: String(x.strategy || "Other XAUUSD Bot"),
-      category: reportCategoryForPattern(pattern, x.category || ""),
-      pattern,
-      direction: String(x.side || x.direction || "-"),
-      result: ["WIN", "LOSS", "BE", "UNKNOWN"].includes(result) ? result : "UNKNOWN",
-      pnl: cleanReportNumber(x.profitLoss ?? x.pnl),
-      lots: cleanReportNumber(x.lots),
-      entry: cleanReportNumber(x.entry),
-      exit: cleanReportNumber(x.exit),
-      stopLoss: cleanReportNumber(x.sl ?? x.stopLoss),
-      takeProfit: cleanReportNumber(x.tp ?? x.takeProfit),
-      openedAt: x.openedAt || null,
-      closedAt: closedAt || null,
-      dateIST: parsedDate && Number.isFinite(parsedDate.getTime()) ? istDateKey(parsedDate) : dateKey
-    };
-  });
-}
 async function sendDailyTradeReport(dateKey = istDateKey()) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.error("Daily Telegram report skipped: Telegram not configured");
     return;
   }
-  let sheetRows;
-  try {
-    sheetRows = await fetchGoogleSheetsDailyTrades(dateKey);
-  } catch (error) {
-    const message = `⚠️ XAUUSD DAILY REPORT FAILED\nDate: ${dateKey} (IST)\nGoogle Sheets read error: ${String(error?.message || error).slice(0, 700)}\nNo in-memory fallback was used, to avoid sending an incomplete report.`;
-    console.error(message);
-    await sendTelegramRaw(message);
-    return;
-  }
-  const report = makeDailyReport(dateKey, sheetRows);
+  const report = makeDailyReport(dateKey);
   const lines = report.split("\n");
   let chunk = "";
   for (const line of lines) {
@@ -1732,7 +1684,6 @@ app.get("/status", (req,res) => res.json({
   uptimeSeconds:Math.floor(process.uptime()),
   timestamp:new Date().toISOString(),
   googleSheetsWebhookConfigured:Boolean(GOOGLE_SHEETS_WEBHOOK_URL),
-  googleSheetsReadConfigured:Boolean(GOOGLE_SHEETS_READ_KEY),
   telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
   closedTradeReportsInMemory:dailyTradeReports.length,
   todayIST:istDateKey(),
