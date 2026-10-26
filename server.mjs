@@ -69,6 +69,11 @@ function cleanReportNumber(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
+function normalizeReportStrategy(value) {
+  const name = String(value || "Unknown strategy").trim();
+  if (/^strategy\s*#?\s*5$/i.test(name) || /^strategy_?5$/i.test(name)) return "Strategy 5";
+  return name;
+}
 function addClosedTradeReport(body = {}) {
   const tradeId = String(body.tradeId || "").trim();
   if (!tradeId) throw new Error("tradeId is required for duplicate protection");
@@ -85,7 +90,7 @@ function addClosedTradeReport(body = {}) {
   const pattern = String(body.pattern || body.setupId || body.strategy || "Unknown pattern").slice(0, 120);
   const record = {
     tradeId,
-    strategy: String(body.strategy || "Unknown strategy").slice(0, 80),
+    strategy: normalizeReportStrategy(body.strategy).slice(0, 80),
     category: reportCategoryForPattern(pattern, body.category),
     pattern,
     direction: String(body.direction || "-").slice(0, 8),
@@ -190,10 +195,11 @@ function fmtMoney(v) {
   return (v > 0 ? "+" : "") + v.toFixed(2);
 }
 function makeDailyReport(dateKey = istDateKey()) {
-  const rows = dailyTradeReports.filter(x => x.dateIST === dateKey);
+  // The 10 PM Telegram report is intentionally Strategy 5 only.
+  const rows = dailyTradeReports.filter(x => x.dateIST === dateKey && x.strategy === "Strategy 5");
   const all = summarizeTradeRecords(rows);
   const lines = [
-    "📊 XAUUSD DAILY TRADING REPORT",
+    "📊 XAUUSD STRATEGY 5 DAILY TRADING REPORT",
     `Date: ${dateKey} (IST)`,
     "━━━━━━━━━━━━━━━━━━━━",
     `TOTAL: ${all.trades} trades | W ${all.wins} | L ${all.losses} | BE ${all.breakeven} | Unknown ${all.unknown}`,
@@ -1129,7 +1135,7 @@ app.post("/risk/:strategy/result", (req,res) => {
   const strategy=String(req.params.strategy||"").toLowerCase();
   try {
     const result=applyTradeResult(strategy,req.body?.result,req.body?.pnl);
-    const labels = { strategy5: "Strategy #5", p78: "P78", orderflow: "Order Flow" };
+    const labels = { strategy5: "Strategy 5", p78: "P78", orderflow: "Order Flow" };
     const closedAt = req.body?.closedAt || new Date().toISOString();
     addClosedTradeReport({
       tradeId: String(req.body?.tradeId || req.body?.orderId || `${strategy}:${closedAt}:${req.body?.result}:${req.body?.pnl ?? "na"}`),
