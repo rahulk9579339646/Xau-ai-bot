@@ -69,12 +69,6 @@ function cleanReportNumber(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
-function normalizeReportStrategy(value) {
-  const name = String(value || "Unknown strategy").trim();
-  // Accept the common Strategy 5 labels, including labels with a descriptive suffix.
-  if (/^strategy\s*#?\s*5(?:$|[\s_-])/i.test(name) || /^strategy_?5(?:$|[\s_-])/i.test(name)) return "Strategy 5";
-  return name;
-}
 function addClosedTradeReport(body = {}) {
   const tradeId = String(body.tradeId || "").trim();
   if (!tradeId) throw new Error("tradeId is required for duplicate protection");
@@ -91,7 +85,7 @@ function addClosedTradeReport(body = {}) {
   const pattern = String(body.pattern || body.setupId || body.strategy || "Unknown pattern").slice(0, 120);
   const record = {
     tradeId,
-    strategy: normalizeReportStrategy(body.strategy).slice(0, 80),
+    strategy: String(body.strategy || "Unknown strategy").slice(0, 80),
     category: reportCategoryForPattern(pattern, body.category),
     pattern,
     direction: String(body.direction || "-").slice(0, 8),
@@ -196,7 +190,6 @@ function fmtMoney(v) {
   return (v > 0 ? "+" : "") + v.toFixed(2);
 }
 function makeDailyReport(dateKey = istDateKey()) {
-  // Include every strategy, including Strategy 5 and Master, as in the original servermaster.mjs.
   const rows = dailyTradeReports.filter(x => x.dateIST === dateKey);
   const all = summarizeTradeRecords(rows);
   const lines = [
@@ -238,12 +231,12 @@ function makeDailyReport(dateKey = istDateKey()) {
   lines.push("━━━━━━━━━━━━━━━━━━━━", "PnL is based only on profit values received from the executor. Missing PnL is not guessed.");
   return lines.join("\n");
 }
-async function sendDailyTradeReport(dateKey = istDateKey()) {
+async function sendDailyTradeReport() {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.error("Daily Telegram report skipped: Telegram not configured");
     return;
   }
-  const report = makeDailyReport(dateKey);
+  const report = makeDailyReport(istDateKey());
   const lines = report.split("\n");
   let chunk = "";
   for (const line of lines) {
@@ -254,32 +247,16 @@ async function sendDailyTradeReport(dateKey = istDateKey()) {
   }
   if (chunk) await sendTelegramRaw(chunk);
 }
-function previousISTDateKey(value = new Date()) {
-  const today = istDateKey(value);
-  const d = new Date(`${today}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() - 1);
-  return d.toISOString().slice(0, 10);
-}
 function scheduleDailyTradeReport() {
   const now = Date.now();
   // India has no daylight-saving changes: IST is UTC+05:30.
   const istNow = new Date(now + 330 * 60 * 1000);
-  const currentHour = istNow.getUTCHours();
-  // Send at 10 PM IST, then again at midnight for the same completed IST date.
-  const targetHour = currentHour < 22 ? 22 : 0;
-  let targetLocalUtc = Date.UTC(
-    istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(),
-    targetHour, 0, 0, 0
-  );
-  if (targetHour === 0 || targetLocalUtc <= now + 330 * 60 * 1000) {
-    if (targetHour === 0) targetLocalUtc += 24 * 60 * 60 * 1000;
-  }
-  const targetEpoch = targetLocalUtc - 330 * 60 * 1000;
+  let targetLocalUtc = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(), 22, 0, 0, 0);
+  let targetEpoch = targetLocalUtc - 330 * 60 * 1000;
+  if (targetEpoch <= now) targetEpoch += 24 * 60 * 60 * 1000;
   setTimeout(async () => {
-    try {
-      const reportDate = targetHour === 0 ? previousISTDateKey() : istDateKey();
-      await sendDailyTradeReport(reportDate);
-    } catch (e) { console.error("Daily report error:", e.message); }
+    try { await sendDailyTradeReport(); }
+    catch (e) { console.error("Daily report error:", e.message); }
     scheduleDailyTradeReport();
   }, Math.max(1000, targetEpoch - now));
 }
@@ -1152,7 +1129,7 @@ app.post("/risk/:strategy/result", (req,res) => {
   const strategy=String(req.params.strategy||"").toLowerCase();
   try {
     const result=applyTradeResult(strategy,req.body?.result,req.body?.pnl);
-    const labels = { strategy5: "Strategy 5", p78: "P78", orderflow: "Order Flow" };
+    const labels = { strategy5: "Strategy #5", p78: "P78", orderflow: "Order Flow" };
     const closedAt = req.body?.closedAt || new Date().toISOString();
     addClosedTradeReport({
       tradeId: String(req.body?.tradeId || req.body?.orderId || `${strategy}:${closedAt}:${req.body?.result}:${req.body?.pnl ?? "na"}`),
@@ -1191,8 +1168,7 @@ app.get("/risk/status", (req,res) => res.json({
 
 /* =========================================================
    SECTION 8 — Telegram command controls
-   Commands: /rahulreport
-             /start_s5 /stop_s5 /status_s5
+   Commands: /start_s5 /stop_s5 /status_s5
              /start_p78 /stop_p78 /status_p78
              /start_orderflow /stop_orderflow /status_orderflow /status_all
    ========================================================= */
@@ -1210,12 +1186,7 @@ async function pollTelegramCommands() {
       telegramUpdateOffset=Math.max(telegramUpdateOffset,Number(update.update_id)+1);
       const message=update.message;
       if (!message?.text || String(message.chat?.id)!==String(TELEGRAM_CHAT_ID)) continue;
-      const command=message.text.trim().split(/\s+/)[0].toLowerCase().split("@")[0];
-      if (command==="/rahulreport") {
-        await sendTelegramRaw("📊 तुमचा ताजा XAUUSD Master + सर्व Strategy चा रिपोर्ट तयार करत आहे...");
-        await sendDailyTradeReport(istDateKey());
-        continue;
-      }
+      const command=message.text.trim().split(/\s+/)[0].toLowerCase();
       const controls={
         "/start_s5":["strategy5",true],"/stop_s5":["strategy5",false],
         "/start_p78":["p78",true],"/stop_p78":["p78",false],
