@@ -39,6 +39,9 @@ const OUTPUT_SYMBOL="XAUUSD";
 const TF={"1H":"1h","15M":"15min","5M":"5min"};
 const CACHE=new Map();
 const CACHE_MS=3000;
+const LIVE_PRICE_CACHE_MS=5000;
+let liveGoldPriceCache=null;
+let marketDataStatus={status:"NOT_CHECKED",source:null,lastCandleTime:null,candleClose:null,livePrice:null,deviation:null,checkedAt:null,error:null};
 let lastScan=null,lastSignalKey=null,lastTelegram=null,lastError=null;
 const telegramEnabledByStrategy = { strategy5: true, p78: true, orderflow: true };
 
@@ -314,30 +317,76 @@ function atrSeries(candles,period=14){
 }
 function normalize(values){return values.map(x=>({time:x.datetime,open:num(x.open),high:num(x.high),low:num(x.low),close:num(x.close),volume:num(x.volume)})).filter(x=>x.time&&[x.open,x.high,x.low,x.close].every(Number.isFinite)).sort((a,b)=>new Date(a.time)-new Date(b.time));}
 
+function intervalDurationMs(interval){
+  if(interval==="1day")return 24*60*60*1000;
+  if(interval==="1h")return 60*60*1000;
+  if(interval==="15min")return 15*60*1000;
+  return 5*60*1000;
+}
+
+async function getLiveGoldPrice(){
+  if(!TWELVE_DATA_API_KEY)throw new Error("TWELVE_DATA_API_KEY is required for live XAU/USD price validation; signals are blocked until configured");
+  if(liveGoldPriceCache&&Date.now()-liveGoldPriceCache.checkedAt<LIVE_PRICE_CACHE_MS)return liveGoldPriceCache;
+  const url=`https://api.twelvedata.com/price?symbol=${encodeURIComponent(SYMBOL)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`;
+  const response=await fetch(url,{signal:AbortSignal.timeout(10000)});
+  const payload=await response.json();
+  const price=Number(payload?.price);
+  if(!response.ok||payload?.status==="error"||!Number.isFinite(price)||price<=0)throw new Error(payload?.message||"Twelve Data live XAU/USD quote unavailable");
+  liveGoldPriceCache={price,checkedAt:Date.now(),source:"Twelve Data /price XAU/USD"};
+  return liveGoldPriceCache;
+}
+
+async function validateCandleFeed(candles,interval,source){
+  if(!Array.isArray(candles)||candles.length<100)throw new Error(`Insufficient candles from ${source}`);
+  const newest=candles[candles.length-1];
+  const candleStart=new Date(newest.time).getTime();
+  if(!Number.isFinite(candleStart))throw new Error(`${source}: invalid latest candle timestamp`);
+  const duration=intervalDurationMs(interval);
+  const candleCloseTime=candleStart+duration;
+  const now=Date.now();
+  // Reject feeds that have stopped updating. The two-interval allowance handles normal provider delays.
+  if(candleCloseTime>now+60000)throw new Error(`${source}: latest candle timestamp is in the future`);
+  if(now-candleCloseTime>duration*2+120000)throw new Error(`${source}: stale ${interval} candles; latest candle ${newest.time}`);
+
+  // 5-minute candles drive all three signal engines. Compare their last CLOSED close with a fresh spot quote.
+  if(interval==="5min"){
+    const live=await getLiveGoldPrice();
+    const deviation=Math.abs(newest.close-live.price);
+    const allowedDeviation=Math.max(10,live.price*0.0035);
+    marketDataStatus={status:deviation<=allowedDeviation?"VALID":"REJECTED",source,lastCandleTime:newest.time,candleClose:newest.close,livePrice:live.price,deviation:Number(deviation.toFixed(2)),allowedDeviation:Number(allowedDeviation.toFixed(2)),checkedAt:new Date().toISOString(),error:null};
+    if(deviation>allowedDeviation)throw new Error(`${source}: price mismatch; 5M candle close ${newest.close}, live XAU/USD ${live.price}, difference ${deviation.toFixed(2)} exceeds ${allowedDeviation.toFixed(2)}. Signal blocked.`);
+  }
+  return candles;
+}
+
 async function getCandles(interval,outputsize=5000){
   const key=`${interval}-${outputsize}`;const cached=CACHE.get(key);if(cached&&Date.now()-cached.t<CACHE_MS)return cached.d;
   let err=null;
   if(TWELVE_DATA_API_KEY){
     try{
       const u=`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(SYMBOL)}&interval=${encodeURIComponent(interval)}&outputsize=${Math.min(outputsize,5000)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}&format=JSON`;
-      const r=await fetch(u);const j=await r.json();
+      const r=await fetch(u,{signal:AbortSignal.timeout(15000)});const j=await r.json();
       if(!r.ok||j.status==="error"||!j.values)throw new Error(j.message||"Twelve Data error");
-      const durationMs=interval==="1h"?60*60*1000:interval==="15min"?15*60*1000:5*60*1000;
-      // Drop any still-forming candle so signals use closed candles only.
+      const durationMs=intervalDurationMs(interval);
+      // Keep only fully closed candles; daily candles must also be fully closed.
       const now=Date.now();
       const d=normalize(j.values).filter(c=>new Date(c.time).getTime()+durationMs<=now);
-      if(d.length<100)throw new Error("Insufficient CLOSED candles from Twelve Data");
+      await validateCandleFeed(d,interval,"Twelve Data");
       CACHE.set(key,{t:Date.now(),d});return d;
     }catch(e){err=e;}
   }
   try{
-    const biInterval=interval==="1h"?"1h":interval==="15min"?"15m":"5m";
+    const biInterval=interval==="1day"?"1d":interval==="1h"?"1h":interval==="15min"?"15m":"5m";
     const u=`https://biquote.io/api/XAUUSD/ohlc?interval=${biInterval}&limit=${Math.min(Math.max(outputsize,100),5000)}`;
-    const r=await fetch(u);const j=await r.json();
+    const r=await fetch(u,{signal:AbortSignal.timeout(15000)});const j=await r.json();
     if(!r.ok||!Array.isArray(j.bars))throw new Error(j.message||"Biquote error");
     const d=j.bars.filter(x=>!x.isOpen).map(x=>({time:x.openTime,open:num(x.open),high:num(x.high),low:num(x.low),close:num(x.close),volume:num(x.volume)||num(x.tickVolume)})).filter(x=>x.time&&[x.open,x.high,x.low,x.close].every(Number.isFinite)).sort((a,b)=>new Date(a.time)-new Date(b.time));
-    if(d.length<100)throw new Error("Insufficient candles");CACHE.set(key,{t:Date.now(),d});return d;
-  }catch(e){throw new Error(`Data error: ${err?.message||"Twelve Data unavailable"}; ${e.message}`);}
+    await validateCandleFeed(d,interval,"Biquote");
+    CACHE.set(key,{t:Date.now(),d});return d;
+  }catch(e){
+    marketDataStatus={...marketDataStatus,status:"BLOCKED",checkedAt:new Date().toISOString(),error:e.message};
+    throw new Error(`Data validation failed: ${err?.message||"Twelve Data unavailable"}; ${e.message}`);
+  }
 }
 
 function addIndicators(candles){
@@ -1688,6 +1737,7 @@ app.get("/status", (req,res) => res.json({
   closedTradeReportsInMemory:dailyTradeReports.length,
   todayIST:istDateKey(),
   todayTradeReports:dailyTradeReports.filter(x => x.dateIST === istDateKey()).length,
+  marketPriceValidation:marketDataStatus,
   note:"A closed trade reaches Google Sheets only if the Liquid executor POSTs it to /report/trade or /risk/:strategy/result. Reports are currently held in memory and reset on restart."
 }));
 
@@ -1697,10 +1747,23 @@ app.get("/", (req,res) => res.json({
   endpoints:[
     "/strategy5/decision","/strategy5/status","/p78/decision","/p78/status",
     "/orderflow/signal","/orderflow/execution-signal","/orderflow/status","/orderflow/footprint",
-    "/master/decision","/master/status",
+    "/master/decision","/master/status","/market/price",
     "/status","/health","/telegram/status","POST /telegram/:strategy","POST /risk/:strategy/result","POST /report/trade","/report/status","/risk/status"
   ]
 }));
+app.get("/market/price", async (req,res) => {
+  try {
+    const live=await getLiveGoldPrice();
+    const candles=await getCandles(TF["5M"],5000);
+    const latest=last(candles);
+    res.json({success:true,instrument:OUTPUT_SYMBOL,livePrice:live.price,priceSource:live.source,
+      lastClosed5MCandle:{time:latest.time,close:latest.close},
+      deviation:Number(Math.abs(latest.close-live.price).toFixed(2)),validation:marketDataStatus});
+  } catch(e) {
+    res.status(503).json({success:false,instrument:OUTPUT_SYMBOL,validation:marketDataStatus,error:e.message});
+  }
+});
+
 app.get("/health", (req,res) => res.json({
   success:true,status:"ok",service:"XAUUSD Three-Strategy Signal Server + Master Pattern Engine",
   masterPatternEngine:true,
