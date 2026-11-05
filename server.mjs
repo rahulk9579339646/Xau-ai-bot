@@ -39,9 +39,11 @@ const OUTPUT_SYMBOL="XAUUSD";
 const TF={"1H":"1h","15M":"15min","5M":"5min"};
 const CACHE=new Map();
 const CACHE_MS=3000;
-const LIVE_PRICE_CACHE_MS=5000;
+const LIVE_PRICE_CACHE_MS=10000;
 let liveGoldPriceCache=null;
-let marketDataStatus={status:"NOT_CHECKED",source:null,lastCandleTime:null,candleClose:null,livePrice:null,deviation:null,checkedAt:null,error:null};
+let twelveDataCooldownUntil=0;
+let twelveDataLastError=null;
+let marketDataStatus={status:"NOT_CHECKED",source:null,lastCandleTime:null,candleClose:null,livePrice:null,deviation:null,allowedDeviation:null,quoteAgeSeconds:null,checkedAt:null,error:null};
 let lastScan=null,lastSignalKey=null,lastTelegram=null,lastError=null;
 const telegramEnabledByStrategy = { strategy5: true, p78: true, orderflow: true };
 
@@ -324,16 +326,66 @@ function intervalDurationMs(interval){
   return 5*60*1000;
 }
 
-async function getLiveGoldPrice(){
-  if(!TWELVE_DATA_API_KEY)throw new Error("TWELVE_DATA_API_KEY is required for live XAU/USD price validation; signals are blocked until configured");
-  if(liveGoldPriceCache&&Date.now()-liveGoldPriceCache.checkedAt<LIVE_PRICE_CACHE_MS)return liveGoldPriceCache;
+function isTwelveDataCreditError(error){
+  const message=String(error?.message||error||"");
+  return /credits were used|current limit|run out of api credits|daily limit|api credits/i.test(message);
+}
+
+function noteTwelveDataError(error){
+  twelveDataLastError=String(error?.message||error||"Twelve Data unavailable");
+  if(isTwelveDataCreditError(error)){
+    // The provider reports that the daily allowance is exhausted. Do not waste
+    // requests retrying it on every strategy scan; Biquote remains the primary feed.
+    twelveDataCooldownUntil=Date.now()+24*60*60*1000;
+  }else{
+    twelveDataCooldownUntil=Math.max(twelveDataCooldownUntil,Date.now()+60*1000);
+  }
+}
+
+async function getBiquoteLiveGoldPrice(){
+  const url="https://biquote.io/api/XAUUSD?allowStale=false";
+  const response=await fetch(url,{signal:AbortSignal.timeout(10000)});
+  const payload=await response.json();
+  const price=Number(payload?.mid);
+  const quoteTime=new Date(payload?.timestamp||"").getTime();
+  const reportedAge=(payload?.quoteAgeSeconds===null||payload?.quoteAgeSeconds===undefined)?NaN:Number(payload.quoteAgeSeconds);
+  const ageSeconds=Number.isFinite(reportedAge)?reportedAge:(Date.now()-quoteTime)/1000;
+  if(!response.ok||!Number.isFinite(price)||price<=0)throw new Error(payload?.message||"Biquote live XAUUSD mid quote unavailable");
+  if(payload?.stale===true||!Number.isFinite(quoteTime)||!Number.isFinite(ageSeconds)||ageSeconds<0||ageSeconds>120){
+    throw new Error(`Biquote live quote is stale or has invalid timestamp (age ${Number.isFinite(ageSeconds)?Math.round(ageSeconds):"unknown"}s)`);
+  }
+  if(String(payload?.marketState||"").toLowerCase()==="closed")throw new Error("Biquote reports XAUUSD market closed; live signals blocked");
+  return {price,checkedAt:Date.now(),source:"Biquote live XAUUSD mid",quoteTime:new Date(quoteTime).toISOString(),quoteAgeSeconds:Number(ageSeconds.toFixed(1))};
+}
+
+async function getTwelveDataLiveGoldPrice(){
+  if(!TWELVE_DATA_API_KEY)throw new Error("Biquote quote unavailable and TWELVE_DATA_API_KEY is not configured");
+  if(Date.now()<twelveDataCooldownUntil)throw new Error(`Twelve Data temporarily skipped: ${twelveDataLastError||"provider cooldown"}`);
   const url=`https://api.twelvedata.com/price?symbol=${encodeURIComponent(SYMBOL)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`;
   const response=await fetch(url,{signal:AbortSignal.timeout(10000)});
   const payload=await response.json();
   const price=Number(payload?.price);
-  if(!response.ok||payload?.status==="error"||!Number.isFinite(price)||price<=0)throw new Error(payload?.message||"Twelve Data live XAU/USD quote unavailable");
-  liveGoldPriceCache={price,checkedAt:Date.now(),source:"Twelve Data /price XAU/USD"};
-  return liveGoldPriceCache;
+  if(!response.ok||payload?.status==="error"||!Number.isFinite(price)||price<=0){
+    const error=new Error(payload?.message||"Twelve Data live XAU/USD quote unavailable");
+    noteTwelveDataError(error);
+    throw error;
+  }
+  return {price,checkedAt:Date.now(),source:"Twelve Data /price XAU/USD",quoteTime:new Date().toISOString(),quoteAgeSeconds:0};
+}
+
+async function getLiveGoldPrice(){
+  if(liveGoldPriceCache&&Date.now()-liveGoldPriceCache.checkedAt<LIVE_PRICE_CACHE_MS)return liveGoldPriceCache;
+  try{
+    liveGoldPriceCache=await getBiquoteLiveGoldPrice();
+    return liveGoldPriceCache;
+  }catch(biquoteError){
+    try{
+      liveGoldPriceCache=await getTwelveDataLiveGoldPrice();
+      return liveGoldPriceCache;
+    }catch(twelveError){
+      throw new Error(`Live XAUUSD quote unavailable. Biquote: ${biquoteError.message}; Twelve Data: ${twelveError.message}`);
+    }
+  }
 }
 
 async function validateCandleFeed(candles,interval,source){
@@ -348,12 +400,12 @@ async function validateCandleFeed(candles,interval,source){
   if(candleCloseTime>now+60000)throw new Error(`${source}: latest candle timestamp is in the future`);
   if(now-candleCloseTime>duration*2+120000)throw new Error(`${source}: stale ${interval} candles; latest candle ${newest.time}`);
 
-  // 5-minute candles drive all three signal engines. Compare their last CLOSED close with a fresh spot quote.
+  // Validate the closed 5M candle against an independently requested live tick quote.
   if(interval==="5min"){
     const live=await getLiveGoldPrice();
     const deviation=Math.abs(newest.close-live.price);
     const allowedDeviation=Math.max(10,live.price*0.0035);
-    marketDataStatus={status:deviation<=allowedDeviation?"VALID":"REJECTED",source,lastCandleTime:newest.time,candleClose:newest.close,livePrice:live.price,deviation:Number(deviation.toFixed(2)),allowedDeviation:Number(allowedDeviation.toFixed(2)),checkedAt:new Date().toISOString(),error:null};
+    marketDataStatus={status:deviation<=allowedDeviation?"VALID":"REJECTED",source,livePriceSource:live.source,lastCandleTime:newest.time,candleClose:newest.close,livePrice:live.price,deviation:Number(deviation.toFixed(2)),allowedDeviation:Number(allowedDeviation.toFixed(2)),quoteAgeSeconds:live.quoteAgeSeconds??null,checkedAt:new Date().toISOString(),error:null};
     if(deviation>allowedDeviation)throw new Error(`${source}: price mismatch; 5M candle close ${newest.close}, live XAU/USD ${live.price}, difference ${deviation.toFixed(2)} exceeds ${allowedDeviation.toFixed(2)}. Signal blocked.`);
   }
   return candles;
@@ -361,31 +413,56 @@ async function validateCandleFeed(candles,interval,source){
 
 async function getCandles(interval,outputsize=5000){
   const key=`${interval}-${outputsize}`;const cached=CACHE.get(key);if(cached&&Date.now()-cached.t<CACHE_MS)return cached.d;
-  let err=null;
-  if(TWELVE_DATA_API_KEY){
+  let twelveError=null;
+
+  // Preserve Twelve Data as the preferred candle history when its API is available.
+  // If its daily credits are exhausted, pause requests for 24 hours and use Biquote.
+  if(TWELVE_DATA_API_KEY&&Date.now()>=twelveDataCooldownUntil){
     try{
       const u=`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(SYMBOL)}&interval=${encodeURIComponent(interval)}&outputsize=${Math.min(outputsize,5000)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}&format=JSON`;
       const r=await fetch(u,{signal:AbortSignal.timeout(15000)});const j=await r.json();
       if(!r.ok||j.status==="error"||!j.values)throw new Error(j.message||"Twelve Data error");
       const durationMs=intervalDurationMs(interval);
-      // Keep only fully closed candles; daily candles must also be fully closed.
       const now=Date.now();
       const d=normalize(j.values).filter(c=>new Date(c.time).getTime()+durationMs<=now);
       await validateCandleFeed(d,interval,"Twelve Data");
       CACHE.set(key,{t:Date.now(),d});return d;
-    }catch(e){err=e;}
+    }catch(e){
+      twelveError=e;
+      noteTwelveDataError(e);
+    }
+  }else if(TWELVE_DATA_API_KEY){
+    twelveError=new Error(`Twelve Data backup paused: ${twelveDataLastError||"provider cooldown"}`);
+  }else{
+    twelveError=new Error("TWELVE_DATA_API_KEY is not configured");
   }
+
+  // Biquote fallback: preserve the requested candle depth by requesting 1,000-bar
+  // time windows, filtering the still-open bar, and merging/deduplicating results.
   try{
     const biInterval=interval==="1day"?"1d":interval==="1h"?"1h":interval==="15min"?"15m":"5m";
-    const u=`https://biquote.io/api/XAUUSD/ohlc?interval=${biInterval}&limit=${Math.min(Math.max(outputsize,100),5000)}`;
-    const r=await fetch(u,{signal:AbortSignal.timeout(15000)});const j=await r.json();
-    if(!r.ok||!Array.isArray(j.bars))throw new Error(j.message||"Biquote error");
-    const d=j.bars.filter(x=>!x.isOpen).map(x=>({time:x.openTime,open:num(x.open),high:num(x.high),low:num(x.low),close:num(x.close),volume:num(x.volume)||num(x.tickVolume)})).filter(x=>x.time&&[x.open,x.high,x.low,x.close].every(Number.isFinite)).sort((a,b)=>new Date(a.time)-new Date(b.time));
+    const durationMs=intervalDurationMs(interval);
+    const requested=Math.min(Math.max(outputsize,100),5000);
+    const pageSize=1000;
+    const pageCount=Math.ceil(requested/pageSize);
+    const endMs=Date.now();
+    const allBars=[];
+    for(let page=0;page<pageCount;page++){
+      const count=Math.min(pageSize,requested-page*pageSize);
+      const toMs=endMs-page*pageSize*durationMs;
+      const fromMs=toMs-count*durationMs;
+      const u=`https://biquote.io/api/XAUUSD/ohlc?interval=${biInterval}&limit=${count}&from=${encodeURIComponent(new Date(fromMs).toISOString())}&to=${encodeURIComponent(new Date(toMs).toISOString())}`;
+      const r=await fetch(u,{signal:AbortSignal.timeout(15000)});const j=await r.json();
+      if(!r.ok||!Array.isArray(j.bars))throw new Error(j.message||"Biquote error");
+      allBars.push(...j.bars);
+    }
+    const seen=new Set();
+    const d=allBars.filter(x=>!x.isOpen).map(x=>({time:x.openTime,open:num(x.open),high:num(x.high),low:num(x.low),close:num(x.close),volume:num(x.volume)||num(x.tickVolume)})).filter(x=>x.time&&[x.open,x.high,x.low,x.close].every(Number.isFinite)).filter(x=>{if(seen.has(x.time))return false;seen.add(x.time);return true;}).sort((a,b)=>new Date(a.time)-new Date(b.time)).slice(-requested);
     await validateCandleFeed(d,interval,"Biquote");
     CACHE.set(key,{t:Date.now(),d});return d;
   }catch(e){
-    marketDataStatus={...marketDataStatus,status:"BLOCKED",checkedAt:new Date().toISOString(),error:e.message};
-    throw new Error(`Data validation failed: ${err?.message||"Twelve Data unavailable"}; ${e.message}`);
+    marketDataStatus={...marketDataStatus,status:"BLOCKED",checkedAt:new Date().toISOString(),error:`Twelve Data: ${twelveError.message}; Biquote: ${e.message}`};
+    throw new Error(`Data validation failed. Twelve Data: ${twelveError.message}; Biquote: ${e.message}`);
   }
 }
 
