@@ -42,7 +42,7 @@ let twelveDataCooldownUntil=0;
 let twelveDataLastError=null;
 let marketDataStatus={status:"NOT_CHECKED",source:null,lastCandleTime:null,candleClose:null,livePrice:null,deviation:null,allowedDeviation:null,quoteAgeSeconds:null,checkedAt:null,error:null};
 let lastError=null;
-const telegramEnabledByStrategy = { strategy5: true };
+const telegramEnabledByStrategy = { strategy5: true, master: true };
 
 // Closed-trade reporting is grouped by India-local date (IST). In-memory only:
 // reports reset if the Render service process is redeployed/restarted.
@@ -702,7 +702,7 @@ app.get("/strategy5/status", (req,res) => res.json({
 app.post("/telegram/:strategy", auth, (req,res) => {
   const key=String(req.params.strategy||"").toLowerCase();
   if (!Object.prototype.hasOwnProperty.call(telegramEnabledByStrategy,key)) {
-    return res.status(400).json({success:false,error:"Use strategy5."});
+    return res.status(400).json({success:false,error:"Use strategy5 or master."});
   }
   telegramEnabledByStrategy[key]=!!req.body?.enabled;
   res.json({success:true,strategy:key,telegramEnabled:telegramEnabledByStrategy[key]});
@@ -758,7 +758,8 @@ app.get("/risk/status", (req,res) => res.json({
 
 /* =========================================================
    SECTION 8 — Telegram command controls
-   Commands: /rahulreport, /start_s5, /stop_s5, /status_s5
+   Commands: /rahulreport, /start_s5, /stop_s5, /status_s5,
+             /start_master, /stop_master, /status_master
    ========================================================= */
 let telegramUpdateOffset=0;
 let telegramPollingBusy=false;
@@ -781,7 +782,8 @@ async function pollTelegramCommands() {
         continue;
       }
       const controls={
-        "/start_s5":["strategy5",true],"/stop_s5":["strategy5",false]
+        "/start_s5":["strategy5",true],"/stop_s5":["strategy5",false],
+        "/start_master":["master",true],"/stop_master":["master",false]
       };
       if (controls[command]) {
         const [strategy,enabled]=controls[command];
@@ -789,6 +791,8 @@ async function pollTelegramCommands() {
         await sendTelegramRaw(`✅ ${strategy} Telegram signals ${enabled?"ON":"OFF"}`);
       } else if (command==="/status_s5") {
         await sendTelegramRaw(`Strategy #5 Telegram: ${telegramEnabledByStrategy.strategy5?"ON":"OFF"} | Lot: ${getDynamicLot("strategy5")}`);
+      } else if (command==="/status_master") {
+        await sendTelegramRaw(`Master pattern Telegram: ${telegramEnabledByStrategy.master?"ON":"OFF"} | Selected patterns: ${MASTER_ALLOWED_IDS.size}`);
       }
     }
   } catch(e) {
@@ -1194,6 +1198,61 @@ async function masterScan(){
 }
 
 
+const MASTER_PATTERN_NAMES = {
+  STRUCTURE_BEARISH_MITIGATION_BLOCK: "Bearish Mitigation Block",
+  CANDLE_HAMMER: "Hammer",
+  CANDLE_MORNING_STAR: "Morning Star",
+  STRUCTURE_BEARISH_ORDER_BLOCK_BREAK: "Bearish Order Block Break",
+  CHART_ASCENDING_TRIANGLE_BULL: "Ascending Triangle Bull",
+  STRUCTURE_BOS_BEAR: "BOS Bear",
+  CANDLE_PIERCING_LINE: "Piercing Line",
+  CHART_RECTANGLE_BEAR_BREAK: "Rectangle Bear Break",
+  CANDLE_INSIDE_BAR_BEAR_BREAK: "Inside Bar Bear Break",
+  CANDLE_SHOOTING_STAR: "Shooting Star",
+  CHART_RECTANGLE_BULL_BREAK: "Rectangle Bull Break",
+  CHART_INVERSE_HEAD_SHOULDERS: "Inverse Head & Shoulders",
+  CHART_TRIPLE_BOTTOM: "Triple Bottom"
+};
+let masterLastAlert = null;
+async function scanMasterAndAlert() {
+  try {
+    const result = await masterScan();
+    if (!telegramEnabledByStrategy.master || !Array.isArray(result.setups)) return result;
+    for (const setup of result.setups) {
+      const key = String(setup.signalKey || "");
+      if (!key || MASTER_IDS.has(key)) continue;
+      const patternName = MASTER_PATTERN_NAMES[setup.setupId] || setup.setupId;
+      const message = [
+        "━━━━━━━━━━━━━━━━━━━━",
+        `🚨 XAUUSD ${patternName.toUpperCase()} SIGNAL`,
+        "━━━━━━━━━━━━━━━━━━━━",
+        `Strategy: ${patternName}`,
+        `Pattern ID: ${setup.setupId}`,
+        `Direction: ${setup.direction}`,
+        `Timeframe: ${setup.timeframe || "5M"}`,
+        `Entry: ${setup.entry}`,
+        `SL: ${setup.sl}`,
+        `TP: ${setup.tp}`,
+        `Risk Reward: ${setup.rrText || `1:${setup.rr}`}`,
+        `Candle Time: ${setup.candleTime}`,
+        `Reason: ${setup.reason || "Confirmed pattern"}`,
+        "━━━━━━━━━━━━━━━━━━━━"
+      ].join("\n");
+      const sent = await sendTelegram("master", message);
+      masterLastAlert = { ...sent, pattern: setup.setupId, patternName, signalKey: key, attemptedAt: new Date().toISOString() };
+      if (sent.sent) {
+        MASTER_IDS.add(key);
+        if (MASTER_IDS.size > 10000) MASTER_IDS.delete(MASTER_IDS.values().next().value);
+      }
+    }
+    return result;
+  } catch (e) {
+    masterLastError = e.message;
+    console.error("Master Telegram scan error:", e.message);
+    return { success:false, strategy:"MASTER_XAUUSD", error:e.message };
+  }
+}
+
 app.get('/master/decision', auth, async (req,res) => {
   try {
     res.json(await masterScan());
@@ -1205,6 +1264,7 @@ app.get('/master/decision', auth, async (req,res) => {
 });
 app.get('/master/status', (req,res) => res.json({success:true,strategy:'MASTER_XAUUSD',
   status:'RUNNING',lastScan:masterLastScan,lastError:masterLastError,
+  telegramEnabled:telegramEnabledByStrategy.master,lastAlert:masterLastAlert,
   allowedPatterns:[...MASTER_ALLOWED_IDS],
   note:'Only the explicitly selected Master pattern IDs are enabled.'}));
 
@@ -1259,6 +1319,8 @@ app.get("/health", (req,res) => res.json({
 /* Independent periodic scans; a Telegram toggle only disables that strategy's messages. */
 setTimeout(() => { scanStrategy5AndAlert(); }, 20000);
 setInterval(scanStrategy5AndAlert, 30000);
+setTimeout(() => { scanMasterAndAlert(); }, 25000);
+setInterval(scanMasterAndAlert, 30000);
 setInterval(pollTelegramCommands, 4000);
 scheduleDailyTradeReport();
 
