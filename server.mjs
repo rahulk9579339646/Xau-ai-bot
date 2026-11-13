@@ -1,7 +1,7 @@
 /* =========================================================
-   XAUUSD THREE-STRATEGY RENDER SERVER
-   SECTION 1: Strategy #5 — Support/Resistance Rejection
-   SECTION 2+: selected Master patterns + Strategy #5
+   XAUUSD SELECTED-STRATEGIES RENDER SERVER
+   Strategy #5 — Support/Resistance Rejection
+   Master Pattern Engine — only the user-selected pattern IDs
 
    Required package: express
    Required Render env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
@@ -41,7 +41,7 @@ let liveGoldPriceCache=null;
 let twelveDataCooldownUntil=0;
 let twelveDataLastError=null;
 let marketDataStatus={status:"NOT_CHECKED",source:null,lastCandleTime:null,candleClose:null,livePrice:null,deviation:null,allowedDeviation:null,quoteAgeSeconds:null,checkedAt:null,error:null};
-let lastScan=null,lastSignalKey=null,lastTelegram=null,lastError=null;
+let lastError=null;
 const telegramEnabledByStrategy = { strategy5: true };
 
 // Closed-trade reporting is grouped by India-local date (IST). In-memory only:
@@ -61,7 +61,7 @@ function reportCategoryForPattern(pattern, supplied = "") {
   if (p.startsWith("CANDLE_")) return "Candlestick";
   if (p.startsWith("CHART_")) return "Chart Pattern";
   if (p.startsWith("STRUCTURE_")) return "Market Structure";
-  if (/SUPPORT|RESISTANCE|S\/R/i.test(p)) return "Support/Resistance";
+    if (/SUPPORT|RESISTANCE|S\/R/i.test(p)) return "Support/Resistance";
   return "Other Strategy";
 }
 function cleanReportNumber(v) {
@@ -466,6 +466,8 @@ function addIndicators(candles){
   return candles.map((x,i)=>({...x,EMA20:e20[i],EMA50:e50[i],RSI14:r[i],ATR14:a[i]}));
 }
 
+async function sendTelegram(strategy,message){if(!telegramEnabledByStrategy[strategy]||!TELEGRAM_BOT_TOKEN||!TELEGRAM_CHAT_ID)return{sent:false,reason:"Telegram disabled/not configured for "+strategy};try{const r=await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:TELEGRAM_CHAT_ID,text:String(message)})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.description||"Telegram failed");return{sent:true};}catch(e){return{sent:false,error:e.message};}}
+
 function auth(req,res,next){if(HF_SECRET&&String(req.headers["x-hf-secret"]||"")!==HF_SECRET)return res.status(401).json({success:false,error:"Unauthorized"});next();}
 
 
@@ -593,7 +595,7 @@ async function strategy5Scan() {
 
 
 /* =========================================================
-   SECTION 0 — STRATEGY #5 LOT COMPOUNDING
+   SECTION 0 — INDEPENDENT LOT COMPOUNDING
    Actual closed-trade outcomes must be reported by the execution bridge.
    Win: multiply current lot by LOT_WIN_MULTIPLIER.
    Loss: multiply current lot by LOT_LOSS_MULTIPLIER.
@@ -675,6 +677,26 @@ async function scanStrategy5AndAlert() {
 }
 
 /* =========================================================
+   SECTION 5 — Strategy #5 HTTP endpoints
+   ========================================================= */
+app.get("/strategy5/decision", auth, async (req,res) => {
+  try {
+    const x = await strategy5Scan();
+    res.status(200).json({
+      ...x, lots:getDynamicLot("strategy5"), telegramEnabled:telegramEnabledByStrategy.strategy5,
+      liquidAutoTrade:LIQUID_AUTO_TRADE, executionAllowed:LIQUID_AUTO_TRADE && !!x.executable
+    });
+  } catch(e) {
+    lastError=e.message;
+    res.status(500).json({success:false,strategy:"STRATEGY_5",status:"ERROR",error:e.message});
+  }
+});
+app.get("/strategy5/status", (req,res) => res.json({
+  success:true, strategy:"STRATEGY_5", status:"RUNNING", telegramEnabled:telegramEnabledByStrategy.strategy5,
+  lastAlert:lastS5Alert, lastSignalKey:lastS5SignalKey, lot:lotBookOutput().strategy5, lastError
+}));
+
+/* =========================================================
    SECTION 7 — independent Telegram switches and compounding results
    ========================================================= */
 app.post("/telegram/:strategy", auth, (req,res) => {
@@ -736,7 +758,7 @@ app.get("/risk/status", (req,res) => res.json({
 
 /* =========================================================
    SECTION 8 — Telegram command controls
-   Commands: /rahulreport /start_s5 /stop_s5 /status_s5
+   Commands: /rahulreport, /start_s5, /stop_s5, /status_s5
    ========================================================= */
 let telegramUpdateOffset=0;
 let telegramPollingBusy=false;
@@ -754,12 +776,17 @@ async function pollTelegramCommands() {
       if (!message?.text || String(message.chat?.id)!==String(TELEGRAM_CHAT_ID)) continue;
       const command=message.text.trim().split(/\s+/)[0].toLowerCase().split("@")[0];
       if (command==="/rahulreport") {
-        await sendTelegramRaw("📊 तुमचा ताजा XAUUSD Strategy #5 + Selected Master Strategies रिपोर्ट तयार करत आहे...");
+        await sendTelegramRaw("📊 तुमचा ताजा XAUUSD Master + सर्व Strategy चा रिपोर्ट तयार करत आहे...");
         await sendDailyTradeReport(istDateKey());
-      } else if (command==="/start_s5" || command==="/stop_s5") {
-        const enabled=command==="/start_s5";
-        telegramEnabledByStrategy.strategy5=enabled;
-        await sendTelegramRaw(`✅ strategy5 Telegram signals ${enabled?"ON":"OFF"}`);
+        continue;
+      }
+      const controls={
+        "/start_s5":["strategy5",true],"/stop_s5":["strategy5",false]
+      };
+      if (controls[command]) {
+        const [strategy,enabled]=controls[command];
+        telegramEnabledByStrategy[strategy]=enabled;
+        await sendTelegramRaw(`✅ ${strategy} Telegram signals ${enabled?"ON":"OFF"}`);
       } else if (command==="/status_s5") {
         await sendTelegramRaw(`Strategy #5 Telegram: ${telegramEnabledByStrategy.strategy5?"ON":"OFF"} | Lot: ${getDynamicLot("strategy5")}`);
       }
@@ -785,8 +812,9 @@ async function sendTelegramRaw(message) {
 
 /* =========================================================
    SECTION 8B — MASTER PATTERN SIGNAL ENGINE
-   Only the user-selected Master strategies are enabled.
-   All other candlestick, chart and market-structure signals are filtered out.
+   Only the exact Master pattern IDs selected by the user are enabled.
+   All other candlestick, chart, and market-structure setups are filtered out.
+   Uses closed candles.
    ========================================================= */
 const MASTER_ALLOWED_IDS = new Set([
   'STRUCTURE_BEARISH_MITIGATION_BLOCK',
@@ -862,7 +890,7 @@ function mRiskRuleFor(id){
  return 'SL beyond confirmed swing/structure invalidation; TP by 1:3 RR';
 }
 function mEmit(out,id,side,c,atr,reason,slOverride=null){
-  // Only the explicitly selected Master strategies are allowed through.
+  // Only the exact pattern IDs selected by the user are allowed through.
   if (!MASTER_ALLOWED_IDS.has(id)) return;
   const x=last(c); if(!x||!atr||atr<=0||c.length<25)return;
   const entry=x.close;
@@ -1177,8 +1205,8 @@ app.get('/master/decision', auth, async (req,res) => {
 });
 app.get('/master/status', (req,res) => res.json({success:true,strategy:'MASTER_XAUUSD',
   status:'RUNNING',lastScan:masterLastScan,lastError:masterLastError,
-  allowedStrategies:[...MASTER_ALLOWED_IDS],
-  note:'Only the explicitly selected Master strategies are enabled.'}));
+  allowedPatterns:[...MASTER_ALLOWED_IDS],
+  note:'Only the explicitly selected Master pattern IDs are enabled.'}));
 
 /* =========================================================
    SECTION 9 — Common health/root routes and one server listener
@@ -1188,7 +1216,7 @@ app.get('/master/status', (req,res) => res.json({success:true,strategy:'MASTER_X
 app.get("/status", (req,res) => res.json({
   success:true,
   status:"ok",
-  service:"XAUUSD Strategy #5 + Selected Master Strategies",
+  service:"XAUUSD Selected Strategies Signal Server",
   uptimeSeconds:Math.floor(process.uptime()),
   timestamp:new Date().toISOString(),
   googleSheetsWebhookConfigured:Boolean(GOOGLE_SHEETS_WEBHOOK_URL),
@@ -1223,7 +1251,7 @@ app.get("/market/price", async (req,res) => {
 });
 
 app.get("/health", (req,res) => res.json({
-  success:true,status:"ok",service:"XAUUSD Strategy #5 + Selected Master Strategies",
+  success:true,status:"ok",service:"XAUUSD Selected Strategies Signal Server",
   masterPatternEngine:true,
   lastStrategyError:lastError
 }));
