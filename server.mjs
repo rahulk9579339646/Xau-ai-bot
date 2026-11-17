@@ -45,7 +45,7 @@ let twelveDataCooldownUntil=0;
 let twelveDataLastError=null;
 let marketDataStatus={status:"NOT_CHECKED",source:null,lastCandleTime:null,candleClose:null,livePrice:null,deviation:null,allowedDeviation:null,quoteAgeSeconds:null,checkedAt:null,error:null};
 let lastScan=null,lastSignalKey=null,lastTelegram=null,lastError=null;
-const telegramEnabledByStrategy = { strategy5: true, p78: true, orderflow: true };
+const telegramEnabledByStrategy = { strategy5: true, p78: true, orderflow: true, master: true };
 
 // Closed-trade reporting is grouped by India-local date (IST). In-memory only:
 // reports reset if the Render service process is redeployed/restarted.
@@ -579,7 +579,7 @@ async function p78Scan(){
 }
 
 function telegramText(x){const s=x.signal||{},l=x.tradeLevels||{};return ["━━━━━━━━━━━━━━━━━━━━","🚨 XAUUSD P78 SIGNAL","━━━━━━━━━━━━━━━━━━━━",`Direction: ${s.direction||"WAIT"}`,`Status: ${s.status||"WAITING"}`,`MTF Score: ${s.score??0}/6`,`Current: ${x.currentPrice??"N/A"}`,"","TRADE LEVELS",`Entry: ${l.entry??"N/A"}`,`SL: ${l.stopLoss??"N/A"}`,`TP: ${l.takeProfit??"N/A"}`,"","Conditions","• CandleStrength != Weak","• MTF Score >= 5","• RetestHeld = TRUE","• Future 25-candle Continuation = NOT USED","","Backtest: 354 trades | 277W | 77L | 78.25% | +255.40R","━━━━━━━━━━━━━━━━━━━━"].join("\n");}
-async function sendTelegram(strategy,message){if(!telegramEnabledByStrategy[strategy]||!TELEGRAM_BOT_TOKEN||!TELEGRAM_CHAT_ID)return{sent:false,reason:"Telegram disabled/not configured for "+strategy};try{const r=await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:TELEGRAM_CHAT_ID,text:String(message)})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.description||"Telegram failed");return{sent:true};}catch(e){return{sent:false,error:e.message};}}
+async function sendTelegram(strategy,message){if(!telegramEnabledByStrategy[strategy]||!TELEGRAM_BOT_TOKEN||!TELEGRAM_CHAT_ID)return{sent:false,reason:"Telegram disabled/not configured for "+strategy};try{const r=await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:TELEGRAM_CHAT_ID,text:"Rahul prop firm\n\n"+String(message)})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.description||"Telegram failed");return{sent:true};}catch(e){return{sent:false,error:e.message};}}
 async function scanAndAlert(){try{const x=await p78Scan();lastScan=x;lastError=null;if(x.executable){const l=x.tradeLevels||{},key=[x.signal.direction,l.entry,l.stopLoss,l.takeProfit,x.signal.signalTime].join("|");if(key!==lastSignalKey){lastTelegram={...(await sendTelegram("p78",telegramText(x))),attemptedAt:new Date().toISOString(),signalKey:key};if(lastTelegram.sent)lastSignalKey=key;}}return x;}catch(e){lastError=e.message;return{success:false,strategy:"P78",status:"ERROR",error:e.message};}}
 function auth(req,res,next){if(HF_SECRET&&String(req.headers["x-hf-secret"]||"")!==HF_SECRET)return res.status(401).json({success:false,error:"Unauthorized"});next();}
 
@@ -1261,7 +1261,7 @@ app.get("/orderflow/footprint", (req,res) => {
 app.post("/telegram/:strategy", auth, (req,res) => {
   const key=String(req.params.strategy||"").toLowerCase();
   if (!Object.prototype.hasOwnProperty.call(telegramEnabledByStrategy,key)) {
-    return res.status(400).json({success:false,error:"Use strategy5, p78, or orderflow."});
+    return res.status(400).json({success:false,error:"Use strategy5, p78, orderflow, or master."});
   }
   telegramEnabledByStrategy[key]=!!req.body?.enabled;
   res.json({success:true,strategy:key,telegramEnabled:telegramEnabledByStrategy[key]});
@@ -1423,6 +1423,7 @@ const MASTER_ALLOWED_CANDLE_IDS = new Set([
 ]);
 
 const MASTER_IDS = new Set();
+const MASTER_TELEGRAM_SENT_IDS = new Set();
 let masterLastScan = null;
 let masterLastError = null;
 
@@ -1765,6 +1766,10 @@ function mDetectCharts(c,atr,out){
  const day=x.time?String(x.time).slice(0,10):'';const todays=c.filter(z=>String(z.time).slice(0,10)===day);if(todays.length>=4){const opening=todays.slice(0,3),oh=mMax(opening.map(z=>z.high)),ol=mMin(opening.map(z=>z.low));if(todays.length>3&&x.close>oh&&p.close<=oh)mEmit(out,'CHART_ORB_BULL_BREAK','BUY',c,atr,'Close above first three 5m candles of UTC day');if(todays.length>3&&x.close<ol&&p.close>=ol)mEmit(out,'CHART_ORB_BEAR_BREAK','SELL',c,atr,'Close below first three 5m candles of UTC day');}
 }
 
+function masterTelegramText(s){
+ const pattern=String(s.setupId||s.strategy||'UNKNOWN_PATTERN').replace(/^CANDLE_/,'').replace(/^CHART_/,'').replace(/_/g,' ');
+ return ['━━━━━━━━━━━━━━━━━━━━','🚨 XAUUSD MASTER PATTERN SIGNAL','━━━━━━━━━━━━━━━━━━━━',`Pattern: ${pattern}`,`Direction: ${s.direction}`,`Entry: ${s.entry}`,`SL: ${s.sl}`,`TP: ${s.tp}`,`RR: ${s.rrText||('1:'+s.rr)}`,`Timeframe: ${s.timeframe||'5M'}`,`Candle Time: ${s.candleTime||'N/A'}`,`Reason: ${s.reason||'N/A'}`,'━━━━━━━━━━━━━━━━━━━━'].join('\n');
+}
 async function masterScan(){
  const [d1,h1,m15,m5]=await Promise.all([getCandles('1day',300),getCandles('1h',500),getCandles('15min',500),getCandles('5min',1000)]);
  if(m5.length<100)throw new Error('Insufficient closed 5M candles');
@@ -1772,6 +1777,12 @@ async function masterScan(){
  mDetectCandles(m5,atr,raw);mDetectStructure(m5,atr,raw);mDetectCharts(m5,atr,raw);
  const seen=new Set(),setups=[];
  for(const s of raw){if(seen.has(s.signalKey))continue;seen.add(s.signalKey);setups.push({...s,instrument:OUTPUT_SYMBOL,timeframe:'5M',candleTime:last(m5).time});}
+ for(const s of setups){
+   if(!MASTER_TELEGRAM_SENT_IDS.has(s.signalKey)){
+     const sent=await sendTelegram('master',masterTelegramText(s));
+     if(sent.sent)MASTER_TELEGRAM_SENT_IDS.add(s.signalKey);
+   }
+ }
  masterLastScan={generatedAt:new Date().toISOString(),closedCandleTime:last(m5).time,count:setups.length,setups};
  masterLastError=null;
  return {success:true,strategy:'MASTER_XAUUSD',instrument:OUTPUT_SYMBOL,generatedAt:masterLastScan.generatedAt,closedCandleTime:last(m5).time,
