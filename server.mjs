@@ -1386,40 +1386,30 @@ async function sendTelegramRaw(message) {
 
 /* =========================================================
    SECTION 8B — MASTER PATTERN SIGNAL ENGINE
-   Only the selected profitable candlestick patterns plus Hammer are enabled.
-   All other candlestick patterns are filtered out. Chart/structure modules
-   remain unchanged. Uses closed candles and existing separate strategy routes.
+   Telegram alerts are restricted to the exact patterns selected by the user.
+   All detectors/rules remain unchanged; only these IDs can be emitted/alerted.
    ========================================================= */
-const MASTER_ALLOWED_CANDLE_IDS = new Set([
-  // Previously identified profitable setups
+const MASTER_ALLOWED_SIGNAL_IDS = new Set([
+  // Candlestick patterns selected by the user
+  'CANDLE_MORNING_STAR',
+  'CANDLE_SHOOTING_STAR',
   'CANDLE_HANGING_MAN',
-  'CANDLE_TWEEZER_TOP',
+  'CANDLE_THREE_BLACK_CROWS',
   'CANDLE_SPINNING_TOP_BEAR_BREAK',
   'CANDLE_BEARISH_ENGULFING',
-  'CANDLE_EVENING_DOJI_STAR',
-  'CANDLE_EVENING_STAR',
-  'CANDLE_DARK_CLOUD_COVER',
-  'CANDLE_DOJI_CONTINUATION_BEAR',
-  'CANDLE_ABANDONED_BABY_BEAR',
-  'CANDLE_DOWNSIDE_TASUKI_GAP',
-  // Additional positive candlestick families from the saved RR2 results
-  'CANDLE_THREE_BLACK_CROWS',
   'CANDLE_OUTSIDE_BAR_BEAR',
-  'CANDLE_OUTSIDE_BAR_BULL',
-  'CANDLE_SPINNING_TOP_BULL_BREAK',
-  'CANDLE_BULLISH_MARUBOZU',
-  'CANDLE_BEARISH_MARUBOZU',
-  'CANDLE_INVERTED_HAMMER',
-  'CANDLE_MORNING_STAR',
-  'CANDLE_THREE_WHITE_SOLDIERS',
-  'CANDLE_SHOOTING_STAR',
+  'CANDLE_EVENING_STAR',
+  'CANDLE_HAMMER',
   'CANDLE_PIERCING_LINE',
-  'CANDLE_DOJI_BULLISH_CONFIRM',
-  'CANDLE_DOJI_BEARISH_CONFIRM',
-  'CANDLE_INSIDE_BAR_BULL_BREAK',
   'CANDLE_INSIDE_BAR_BEAR_BREAK',
-  // Hammer is the one additional exception requested
-  'CANDLE_HAMMER'
+  // Chart patterns selected by the user
+  'CHART_ASCENDING_TRIANGLE_BULL',
+  'CHART_RECTANGLE_BEAR_BREAK',
+  'CHART_RECTANGLE_BULL_BREAK',
+  // Market-structure patterns selected by the user
+  'STRUCTURE_BEARISH_MITIGATION_BLOCK',
+  'STRUCTURE_BOS_BEAR',
+  'STRUCTURE_BEARISH_ORDER_BLOCK_BREAK'
 ]);
 
 const MASTER_IDS = new Set();
@@ -1481,8 +1471,8 @@ function mRiskRuleFor(id){
  return 'SL beyond confirmed swing/structure invalidation; TP by 1:2 RR';
 }
 function mEmit(out,id,side,c,atr,reason,slOverride=null){
-  // Only the selected profitable candlestick setups are allowed through.
-  if (String(id).startsWith('CANDLE_') && !MASTER_ALLOWED_CANDLE_IDS.has(id)) return;
+  // Only the exact user-selected signal IDs are allowed through.
+  if (!MASTER_ALLOWED_SIGNAL_IDS.has(String(id))) return;
   const x=last(c); if(!x||!atr||atr<=0||c.length<25)return;
   const entry=x.close;
   // Avoid entries on weak close-only pokes; breakout candles need meaningful body and close near the extreme.
@@ -1776,7 +1766,7 @@ async function masterScan(){
  const atr=mAtrLast(m5),raw=[];
  mDetectCandles(m5,atr,raw);mDetectStructure(m5,atr,raw);mDetectCharts(m5,atr,raw);
  const seen=new Set(),setups=[];
- for(const s of raw){if(seen.has(s.signalKey))continue;seen.add(s.signalKey);setups.push({...s,instrument:OUTPUT_SYMBOL,timeframe:'5M',candleTime:last(m5).time});}
+ for(const s of raw){if(!MASTER_ALLOWED_SIGNAL_IDS.has(String(s.setupId)))continue;if(seen.has(s.signalKey))continue;seen.add(s.signalKey);setups.push({...s,instrument:OUTPUT_SYMBOL,timeframe:'5M',candleTime:last(m5).time});}
  for(const s of setups){
    if(!MASTER_TELEGRAM_SENT_IDS.has(s.signalKey)){
      const sent=await sendTelegram('master',masterTelegramText(s));
@@ -1795,6 +1785,21 @@ async function masterScan(){
 }
 
 
+let masterPeriodicScanBusy = false;
+async function periodicMasterScan(){
+  if(masterPeriodicScanBusy)return;
+  masterPeriodicScanBusy=true;
+  try{
+    const result=await masterScan();
+    console.log('Master selected-signal scan:',result.count,'setups; Telegram:',telegramEnabledByStrategy.master?'ON':'OFF');
+  }catch(e){
+    masterLastError=e.message;
+    console.error('Master periodic scan error:',e.message);
+  }finally{
+    masterPeriodicScanBusy=false;
+  }
+}
+
 app.get('/master/decision', auth, async (req,res) => {
   try {
     res.json(await masterScan());
@@ -1806,8 +1811,8 @@ app.get('/master/decision', auth, async (req,res) => {
 });
 app.get('/master/status', (req,res) => res.json({success:true,strategy:'MASTER_XAUUSD',
   status:'RUNNING',lastScan:masterLastScan,lastError:masterLastError,
-  allowedCandlestickPatterns:[...MASTER_ALLOWED_CANDLE_IDS],
-  note:'All other candlestick patterns filtered out; chart and market-structure detectors retained.'}));
+  allowedSignals:[...MASTER_ALLOWED_SIGNAL_IDS],
+  note:'Only the user-selected candlestick, chart and market-structure signals are enabled.'}));
 
 /* =========================================================
    SECTION 9 — Common health/root routes and one server listener
@@ -1861,7 +1866,8 @@ app.get("/health", (req,res) => res.json({
 }));
 
 /* Independent periodic scans; a Telegram toggle only disables that strategy's messages. */
-setTimeout(() => { scanStrategy5AndAlert(); scanAndAlert(); }, 20000);
+setTimeout(() => { scanStrategy5AndAlert(); scanAndAlert(); periodicMasterScan(); }, 20000);
+setInterval(periodicMasterScan, 30000);
 setInterval(scanStrategy5AndAlert, 30000);
 setInterval(scanAndAlert, 60000);
 setInterval(scanOrderFlowAndAlert, 5000);
