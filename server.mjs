@@ -1756,9 +1756,17 @@ function mDetectCharts(c,atr,out){
  const day=x.time?String(x.time).slice(0,10):'';const todays=c.filter(z=>String(z.time).slice(0,10)===day);if(todays.length>=4){const opening=todays.slice(0,3),oh=mMax(opening.map(z=>z.high)),ol=mMin(opening.map(z=>z.low));if(todays.length>3&&x.close>oh&&p.close<=oh)mEmit(out,'CHART_ORB_BULL_BREAK','BUY',c,atr,'Close above first three 5m candles of UTC day');if(todays.length>3&&x.close<ol&&p.close>=ol)mEmit(out,'CHART_ORB_BEAR_BREAK','SELL',c,atr,'Close below first three 5m candles of UTC day');}
 }
 
+function formatCandleTimeIST(value){
+ if(value===null||value===undefined||value==='')return 'N/A';
+ let source=value;
+ if(typeof source==='string'&&!/(Z|[+-]\d{2}:?\d{2})$/i.test(source.trim()))source=source.trim().replace(' ','T')+'Z';
+ const date=new Date(source);
+ if(!Number.isFinite(date.getTime()))return String(value);
+ return new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(date)+' IST';
+}
 function masterTelegramText(s){
  const pattern=String(s.setupId||s.strategy||'UNKNOWN_PATTERN').replace(/^CANDLE_/,'').replace(/^CHART_/,'').replace(/_/g,' ');
- return ['━━━━━━━━━━━━━━━━━━━━','🚨 XAUUSD MASTER PATTERN SIGNAL','━━━━━━━━━━━━━━━━━━━━',`Pattern: ${pattern}`,`Direction: ${s.direction}`,`Entry: ${s.entry}`,`SL: ${s.sl}`,`TP: ${s.tp}`,`RR: ${s.rrText||('1:'+s.rr)}`,`Timeframe: ${s.timeframe||'5M'}`,`Candle Time: ${s.candleTime||'N/A'}`,`Reason: ${s.reason||'N/A'}`,'━━━━━━━━━━━━━━━━━━━━'].join('\n');
+ return ['━━━━━━━━━━━━━━━━━━━━','🚨 XAUUSD MASTER PATTERN SIGNAL','━━━━━━━━━━━━━━━━━━━━',`Pattern: ${pattern}`,`Direction: ${s.direction}`,`Entry: ${s.entry}`,`SL: ${s.sl}`,`TP: ${s.tp}`,`RR: ${s.rrText||('1:'+s.rr)}`,`Timeframe: ${s.timeframe||'5M'}`,`Candle Time: ${formatCandleTimeIST(s.candleTime)}`,`Reason: ${s.reason||'N/A'}`,'━━━━━━━━━━━━━━━━━━━━'].join('\n');
 }
 async function masterScan(){
  const [d1,h1,m15,m5]=await Promise.all([getCandles('1day',300),getCandles('1h',500),getCandles('15min',500),getCandles('5min',1000)]);
