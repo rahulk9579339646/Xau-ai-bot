@@ -34,45 +34,6 @@ const TELEGRAM_CHAT_ID=process.env.TELEGRAM_CHAT_ID||"";
 const LIQUID_AUTO_TRADE=String(process.env.LIQUID_AUTO_TRADE||"false").toLowerCase()==="true";
 const HF_SECRET=process.env.HF_SECRET||"";
 const GOOGLE_SHEETS_WEBHOOK_URL=process.env.GOOGLE_SHEETS_WEBHOOK_URL||"";
-
-// QT Funded competition-account protection. The MT5 EA sends live account
-// equity and its persisted New-York 17:00 reset baseline. The EA also enforces
-// the limits locally, so a Render restart/outage cannot disable local protection.
-const PROP_FIRM_ENABLED=String(process.env.PROP_FIRM_ENABLED??"true").toLowerCase()==="true";
-const PROP_FIRM_SECRET=process.env.PROP_FIRM_SECRET||HF_SECRET||process.env.EXECUTION_SECRET||"";
-const PROP_INITIAL_EQUITY=100000;
-const PROP_DAILY_LOSS_LIMIT=2000;
-const PROP_MAX_LOSS_LIMIT=8000;
-const PROP_SNAPSHOT_MAX_AGE_MS=30000;
-let propFirmSnapshot=null;
-let propFirmLastUpdate=null;
-function propFirmAuth(req){
-  const supplied=String(req.headers["x-hf-secret"]||req.headers["x-execution-secret"]||"");
-  return !!PROP_FIRM_SECRET && supplied===PROP_FIRM_SECRET;
-}
-function propFirmEvaluate(snapshot=propFirmSnapshot){
-  if(!PROP_FIRM_ENABLED)return {enabled:false,allowed:true,locked:false,reason:"PROP_FIRM_GUARD_DISABLED"};
-  if(!PROP_FIRM_SECRET)return {enabled:true,allowed:false,locked:true,reason:"PROP_FIRM_SECRET_NOT_CONFIGURED"};
-  if(!snapshot)return {enabled:true,allowed:false,locked:true,reason:"WAITING_FOR_MT5_ACCOUNT_SNAPSHOT"};
-  const age=Date.now()-new Date(snapshot.receivedAt).getTime();
-  if(!Number.isFinite(age)||age>PROP_SNAPSHOT_MAX_AGE_MS)return {enabled:true,allowed:false,locked:true,reason:"MT5_SNAPSHOT_STALE",snapshotAgeMs:age};
-  const dailyLoss=Math.max(0,Number(snapshot.dayStartEquity)-Number(snapshot.equity));
-  const overallLoss=Math.max(0,PROP_INITIAL_EQUITY-Number(snapshot.equity));
-  const dailyBreached=dailyLoss>=PROP_DAILY_LOSS_LIMIT;
-  const overallBreached=overallLoss>=PROP_MAX_LOSS_LIMIT;
-  const valid=[snapshot.equity,snapshot.dayStartEquity,snapshot.dayKey].every(v=>v!==undefined&&v!==null&&v!=="") &&
-    Number.isFinite(Number(snapshot.equity))&&Number.isFinite(Number(snapshot.dayStartEquity));
-  if(!valid)return {enabled:true,allowed:false,locked:true,reason:"INVALID_MT5_ACCOUNT_SNAPSHOT"};
-  const reportedLock=snapshot.locked===true;
-  const locked=dailyBreached||overallBreached||reportedLock;
-  const reason=overallBreached?"MAXIMUM_LOSS_LIMIT_REACHED":dailyBreached?"DAILY_LOSS_LIMIT_REACHED":reportedLock?(String(snapshot.lockReason||"RISK_LIMIT_PREVIOUSLY_REACHED")):"WITHIN_LIMITS";
-  return {enabled:true,allowed:!locked,locked,reason,
-    initialEquity:PROP_INITIAL_EQUITY,equity:Number(snapshot.equity),balance:Number(snapshot.balance),dayStartEquity:Number(snapshot.dayStartEquity),
-    dailyLoss:Number(dailyLoss.toFixed(2)),dailyLossLimit:PROP_DAILY_LOSS_LIMIT,dailyLossPercent:Number((dailyLoss/PROP_INITIAL_EQUITY*100).toFixed(3)),
-    overallLoss:Number(overallLoss.toFixed(2)),maxLossLimit:PROP_MAX_LOSS_LIMIT,equityFloor:PROP_INITIAL_EQUITY-PROP_MAX_LOSS_LIMIT,
-    dayKey:String(snapshot.dayKey),snapshotAt:snapshot.receivedAt,snapshotAgeMs:age};
-}
-function propFirmCanTrade(){return !PROP_FIRM_ENABLED || propFirmEvaluate().allowed;}
 const SYMBOL="XAU/USD";
 const OUTPUT_SYMBOL="XAUUSD";
 const TF={"1H":"1h","15M":"15min","5M":"5min"};
@@ -1180,7 +1141,7 @@ app.get("/strategy5/decision", auth, async (req,res) => {
     const x = await strategy5Scan();
     res.status(200).json({
       ...x, lots:getDynamicLot("strategy5"), telegramEnabled:telegramEnabledByStrategy.strategy5,
-      liquidAutoTrade:LIQUID_AUTO_TRADE, executionAllowed:LIQUID_AUTO_TRADE && !!x.executable && propFirmCanTrade()
+      liquidAutoTrade:LIQUID_AUTO_TRADE, executionAllowed:LIQUID_AUTO_TRADE && !!x.executable
     });
   } catch(e) {
     lastError=e.message;
@@ -1196,14 +1157,13 @@ app.get("/p78/decision", auth, async (req,res) => {
   const x=await scanAndAlert();
   res.status(x.success===false?500:200).json({
     ...x, lots:getDynamicLot("p78"), telegramEnabled:telegramEnabledByStrategy.p78,
-    liquidAutoTrade:LIQUID_AUTO_TRADE, executionAllowed:LIQUID_AUTO_TRADE && !!x.executable && propFirmCanTrade(), propFirm:propFirmEvaluate()
+    liquidAutoTrade:LIQUID_AUTO_TRADE, executionAllowed:LIQUID_AUTO_TRADE && !!x.executable
   });
 });
 
 // One-time reservation endpoint used by the Liquid Chart P78 executor.
 app.post("/p78/consume", auth, async (req,res) => {
   try {
-    if(!propFirmCanTrade()) return res.status(423).json({success:true,reservation:{accepted:false,reason:"QT Funded risk protection is locked",propFirm:propFirmEvaluate()}});
     const requestedKey=String(req.body?.signalKey||"");
     if(!requestedKey) return res.status(400).json({success:false,reservation:{accepted:false,reason:"signalKey is required"}});
     const x=await p78Scan();
@@ -1257,7 +1217,7 @@ async function scanOrderFlowAndAlert() {
 app.get("/orderflow/execution-signal", (req,res) => {
   if (!orderFlow.authorized(req)) return res.status(401).json({success:false,error:"Unauthorized"});
   const result=orderFlow.buildExecutionSignal();
-  res.json({...result, telegramEnabled:telegramEnabledByStrategy.orderflow, lot:lotBookOutput().orderflow, executionAllowed:LIQUID_AUTO_TRADE && !!result.executable && propFirmCanTrade(), propFirm:propFirmEvaluate()});
+  res.json({...result, telegramEnabled:telegramEnabledByStrategy.orderflow, lot:lotBookOutput().orderflow});
 });
 app.get("/orderflow/signal", (req,res) => {
   const signal=orderFlow.calculateSignal();
@@ -1350,34 +1310,9 @@ app.get("/report/status", auth, (req, res) => {
   res.json({ success: true, dateIST: date, ...summarizeTradeRecords(records), records });
 });
 
-// QT Funded account snapshot from MT5. The MT5 EA is the authoritative
-// live source for equity and the New-York 17:00 day-start baseline.
-app.post("/propfirm/snapshot", (req,res) => {
-  if(!propFirmAuth(req))return res.status(401).json({success:false,error:"Unauthorized: configure PROP_FIRM_SECRET (or HF_SECRET)"});
-  const b=req.body||{};
-  const equity=Number(b.equity),balance=Number(b.balance),dayStartEquity=Number(b.dayStartEquity);
-  const dayKey=String(b.dayKey||"").slice(0,40);
-  if(!Number.isFinite(equity)||!Number.isFinite(balance)||!Number.isFinite(dayStartEquity)||!dayKey)
-    return res.status(400).json({success:false,error:"equity, balance, dayStartEquity and dayKey are required numeric/account fields"});
-  propFirmSnapshot={equity,balance,dayStartEquity,dayKey,locked:b.locked===true,lockReason:String(b.lockReason||"").slice(0,80),receivedAt:new Date().toISOString(),accountLogin:String(b.accountLogin||"").slice(0,40),currency:String(b.currency||"").slice(0,10)};
-  propFirmLastUpdate=propFirmSnapshot.receivedAt;
-  const risk=propFirmEvaluate();
-  console.log("QT Funded risk snapshot:",risk.reason,"equity",equity,"dailyLoss",risk.dailyLoss,"overallLoss",risk.overallLoss);
-  res.json({success:true,propFirm:risk});
-});
-app.get("/propfirm/permission", (req,res) => {
-  if(!propFirmAuth(req))return res.status(401).json({success:false,error:"Unauthorized"});
-  const risk=propFirmEvaluate();
-  res.status(risk.allowed?200:423).json({success:true,executionAllowed:risk.allowed,propFirm:risk});
-});
-app.get("/propfirm/status", (req,res) => res.json({success:true,propFirm:propFirmEvaluate(),lastUpdate:propFirmLastUpdate,
-  rules:{firm:"QT Funded",accountType:"Competition",initialEquity:PROP_INITIAL_EQUITY,dailyLossLimit:PROP_DAILY_LOSS_LIMIT,
-    maximumLossLimit:PROP_MAX_LOSS_LIMIT,equityFloor:PROP_INITIAL_EQUITY-PROP_MAX_LOSS_LIMIT,
-    resetTimezone:"America/New_York",resetLocalTime:"17:00",previousDayEndsAt:"16:59"}}));
-
 app.get("/risk/status", (req,res) => res.json({
   success:true,lotStep:LOT_STEP,winMultiplier:LOT_WIN_MULTIPLIER,lossMultiplier:LOT_LOSS_MULTIPLIER,
-  minLot:LOT_MIN,maxLot:LOT_MAX,strategies:lotBookOutput(),propFirm:propFirmEvaluate()
+  minLot:LOT_MIN,maxLot:LOT_MAX,strategies:lotBookOutput()
 }));
 
 /* =========================================================
@@ -1596,19 +1531,16 @@ function mDetectCandles(c,atr,out){
  const upContext=ema20!==null&&b.close>ema20;
  const doji=body<=range*.10, small=body<=range*.30;
 
- // One-candle reversal candidates use the previous candle; the latest CLOSED candle must confirm by breaking its extreme.
- const cb=mBody(b),cr=mRange(b),cu=mUpper(b),cd=mLower(b);
- const priorEma=mEmaLast(c.slice(0,-2),20);
- const priorDown=priorEma!==null&&a.close<priorEma;
- const priorUp=priorEma!==null&&a.close>priorEma;
- if(cd>=Math.max(cb*2,cr*.45)&&cu<=cr*.2&&cb<=cr*.4&&priorDown&&mBull(x)&&x.close>b.high)
-   mEmit(out,'CANDLE_HAMMER','BUY',c,atr,'Hammer candidate after bearish context; confirmed only by next closed candle breaking hammer high');
+ // Single-candle reversal patterns are evaluated on the candle that has JUST CLOSED.
+ // Do not wait for another 5M candle to confirm Hammer / Hanging Man / Shooting Star.
+ if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&downContext)
+   mEmit(out,'CANDLE_HAMMER','BUY',c,atr,'Hammer formed and confirmed at the close of this 5M candle after bearish context');
  if(cu>=Math.max(cb*2,cr*.45)&&cd<=cr*.2&&cb<=cr*.4&&priorDown&&mBull(x)&&x.close>b.high)
    mEmit(out,'CANDLE_INVERTED_HAMMER','BUY',c,atr,'Inverted-hammer candidate after bearish context; next closed candle breaks high');
- if(cd>=Math.max(cb*2,cr*.45)&&cu<=cr*.2&&cb<=cr*.4&&priorUp&&mBear(x)&&x.close<b.low)
-   mEmit(out,'CANDLE_HANGING_MAN','SELL',c,atr,'Hanging-man candidate after bullish context; next closed candle breaks low');
- if(cu>=Math.max(cb*2,cr*.45)&&cd<=cr*.2&&cb<=cr*.4&&priorUp&&mBear(x)&&x.close<b.low)
-   mEmit(out,'CANDLE_SHOOTING_STAR','SELL',c,atr,'Shooting-star candidate after bullish context; next closed candle breaks low');
+ if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&upContext)
+   mEmit(out,'CANDLE_HANGING_MAN','SELL',c,atr,'Hanging Man formed and confirmed at the close of this 5M candle after bullish context');
+ if(up>=Math.max(body*2,range*.45)&&dn<=range*.2&&body<=range*.4&&upContext)
+   mEmit(out,'CANDLE_SHOOTING_STAR','SELL',c,atr,'Shooting Star formed and confirmed at the close of this 5M candle after bullish context');
  if(cd>=cr*.60&&cu<=cr*.15&&priorDown&&mBull(x)&&x.close>b.high)
    mEmit(out,'CANDLE_BULLISH_PIN_BAR','BUY',c,atr,'Pin-bar candidate at bearish context; confirmed by close above candidate high');
  if(cu>=cr*.60&&cd<=cr*.15&&priorUp&&mBear(x)&&x.close<b.low)
@@ -1851,7 +1783,7 @@ async function masterScan(){
  return {success:true,strategy:'MASTER_XAUUSD',instrument:OUTPUT_SYMBOL,generatedAt:masterLastScan.generatedAt,closedCandleTime:last(m5).time,
    timeframes:{D1:last(d1)?.close??null,H1:last(h1)?.close??null,M15:last(m15)?.close??null,M5:last(m5)?.close??null},rr:'1:2',maxRiskPercent:1,
    confirmationPolicy:{closedCandlesOnly:true,reversalNeedsConfirmedLocation:true,breakoutsNeedStrongClose:true,slBeyondSignalExtreme:true,complexChartPatternsAreHeuristic:true},
-   executable:setups.length>0,executionAllowed:LIQUID_AUTO_TRADE&&setups.length>0&&propFirmCanTrade(),propFirm:propFirmEvaluate(),signal:setups.length?'MULTIPLE_SETUPS':'WAIT',setups,
+   executable:setups.length>0,executionAllowed:LIQUID_AUTO_TRADE&&setups.length>0,signal:setups.length?'MULTIPLE_SETUPS':'WAIT',setups,
    rrPolicy:{candlestickReversal:'1:1.5',candlestickContinuation:'1:2',chartReversal:'1:2.5',chartContinuation:'1:2',orb:'1:1.5',liquidityOrderBlockFVG:'1:1.5',marketStructureTrend:'1:2'},
    trailingPolicy:'At +0.5R SL to breakeven; at +1R lock +0.5R; thereafter each additional +0.5R locks another +0.5R',
    note:'Independent heuristic setup modules; all signals use closed candles. Complex chart formations are approximations and require backtesting before live use.'};
@@ -1904,7 +1836,6 @@ app.get("/status", (req,res) => res.json({
   todayIST:istDateKey(),
   todayTradeReports:dailyTradeReports.filter(x => x.dateIST === istDateKey()).length,
   marketPriceValidation:marketDataStatus,
-  propFirm:propFirmEvaluate(),
   note:"A closed trade reaches Google Sheets only if the Liquid executor POSTs it to /report/trade or /risk/:strategy/result. Reports are currently held in memory and reset on restart."
 }));
 
@@ -1915,7 +1846,7 @@ app.get("/", (req,res) => res.json({
     "/strategy5/decision","/strategy5/status","/p78/decision","/p78/status",
     "/orderflow/signal","/orderflow/execution-signal","/orderflow/status","/orderflow/footprint",
     "/master/decision","/master/status","/market/price",
-    "/status","/health","/telegram/status","POST /telegram/:strategy","POST /risk/:strategy/result","POST /report/trade","/report/status","/risk/status","POST /propfirm/snapshot","/propfirm/permission","/propfirm/status"
+    "/status","/health","/telegram/status","POST /telegram/:strategy","POST /risk/:strategy/result","POST /report/trade","/report/status","/risk/status"
   ]
 }));
 app.get("/market/price", async (req,res) => {
