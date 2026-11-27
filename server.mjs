@@ -1531,20 +1531,23 @@ function mDetectCandles(c,atr,out){
  const upContext=ema20!==null&&b.close>ema20;
  const doji=body<=range*.10, small=body<=range*.30;
 
- // Single-candle reversal patterns are evaluated on the candle that has JUST CLOSED.
- // Do not wait for another 5M candle to confirm Hammer / Hanging Man / Shooting Star.
- if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&downContext)
-   mEmit(out,'CANDLE_HAMMER','BUY',c,atr,'Hammer formed and confirmed at the close of this 5M candle after bearish context');
- if(up>=Math.max(body*2,range*.45)&&dn<=range*.2&&body<=range*.4&&downContext)
-   mEmit(out,'CANDLE_INVERTED_HAMMER','BUY',c,atr,'Inverted Hammer formed and confirmed at the close of this 5M candle after bearish context');
- if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&upContext)
-   mEmit(out,'CANDLE_HANGING_MAN','SELL',c,atr,'Hanging Man formed and confirmed at the close of this 5M candle after bullish context');
- if(up>=Math.max(body*2,range*.45)&&dn<=range*.2&&body<=range*.4&&upContext)
-   mEmit(out,'CANDLE_SHOOTING_STAR','SELL',c,atr,'Shooting Star formed and confirmed at the close of this 5M candle after bullish context');
- if(dn>=range*.60&&up<=range*.15&&downContext)
-   mEmit(out,'CANDLE_BULLISH_PIN_BAR','BUY',c,atr,'Bullish pin bar formed at the close of this candle after bearish context');
- if(up>=range*.60&&dn<=range*.15&&upContext)
-   mEmit(out,'CANDLE_BEARISH_PIN_BAR','SELL',c,atr,'Bearish pin bar formed at the close of this candle after bullish context');
+ // Selected single-candle reversals trigger on the latest CLOSED candle, without waiting for another 5M candle.
+ const cb=mBody(b),cr=mRange(b),cu=mUpper(b),cd=mLower(b);
+ const priorEma=mEmaLast(c.slice(0,-2),20);
+ const priorDown=priorEma!==null&&a.close<priorEma;
+ const priorUp=priorEma!==null&&a.close>priorEma;
+ if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&downContext&&mBull(x))
+   mEmit(out,'CANDLE_HAMMER','BUY',c,atr,'Hammer formed after bearish context; signal on hammer candle close');
+ if(cu>=Math.max(cb*2,cr*.45)&&cd<=cr*.2&&cb<=cr*.4&&priorDown&&mBull(x)&&x.close>b.high)
+   mEmit(out,'CANDLE_INVERTED_HAMMER','BUY',c,atr,'Inverted-hammer candidate after bearish context; next closed candle breaks high');
+ if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&upContext&&mBear(x))
+   mEmit(out,'CANDLE_HANGING_MAN','SELL',c,atr,'Hanging Man formed after bullish context; signal on pattern candle close');
+ if(up>=Math.max(body*2,range*.45)&&dn<=range*.2&&body<=range*.4&&upContext&&mBear(x))
+   mEmit(out,'CANDLE_SHOOTING_STAR','SELL',c,atr,'Shooting Star formed after bullish context; signal on pattern candle close');
+ if(cd>=cr*.60&&cu<=cr*.15&&priorDown&&mBull(x)&&x.close>b.high)
+   mEmit(out,'CANDLE_BULLISH_PIN_BAR','BUY',c,atr,'Pin-bar candidate at bearish context; confirmed by close above candidate high');
+ if(cu>=cr*.60&&cd<=cr*.15&&priorUp&&mBear(x)&&x.close<b.low)
+   mEmit(out,'CANDLE_BEARISH_PIN_BAR','SELL',c,atr,'Pin-bar candidate at bullish context; confirmed by close below candidate low');
  if(body>=range*.85&&mBull(x))mEmit(out,'CANDLE_BULLISH_MARUBOZU','BUY',c,atr,'Bull body >=85% of range');
  if(body>=range*.85&&mBear(x))mEmit(out,'CANDLE_BEARISH_MARUBOZU','SELL',c,atr,'Bear body >=85% of range');
  if(small&&up>=range*.2&&dn>=range*.2){
@@ -1753,17 +1756,9 @@ function mDetectCharts(c,atr,out){
  const day=x.time?String(x.time).slice(0,10):'';const todays=c.filter(z=>String(z.time).slice(0,10)===day);if(todays.length>=4){const opening=todays.slice(0,3),oh=mMax(opening.map(z=>z.high)),ol=mMin(opening.map(z=>z.low));if(todays.length>3&&x.close>oh&&p.close<=oh)mEmit(out,'CHART_ORB_BULL_BREAK','BUY',c,atr,'Close above first three 5m candles of UTC day');if(todays.length>3&&x.close<ol&&p.close>=ol)mEmit(out,'CHART_ORB_BEAR_BREAK','SELL',c,atr,'Close below first three 5m candles of UTC day');}
 }
 
-function formatCandleTimeIST(value){
- if(value===null||value===undefined||value==='')return 'N/A';
- let source=value;
- if(typeof source==='string'&&!/(Z|[+-]\d{2}:?\d{2})$/i.test(source.trim()))source=source.trim().replace(' ','T')+'Z';
- const date=new Date(source);
- if(!Number.isFinite(date.getTime()))return String(value);
- return new Intl.DateTimeFormat('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(date)+' IST';
-}
 function masterTelegramText(s){
  const pattern=String(s.setupId||s.strategy||'UNKNOWN_PATTERN').replace(/^CANDLE_/,'').replace(/^CHART_/,'').replace(/_/g,' ');
- return ['━━━━━━━━━━━━━━━━━━━━','🚨 XAUUSD MASTER PATTERN SIGNAL','━━━━━━━━━━━━━━━━━━━━',`Pattern: ${pattern}`,`Direction: ${s.direction}`,`Entry: ${s.entry}`,`SL: ${s.sl}`,`TP: ${s.tp}`,`RR: ${s.rrText||('1:'+s.rr)}`,`Timeframe: ${s.timeframe||'5M'}`,`Candle Time: ${formatCandleTimeIST(s.candleTime)}`,`Reason: ${s.reason||'N/A'}`,'━━━━━━━━━━━━━━━━━━━━'].join('\n');
+ return ['━━━━━━━━━━━━━━━━━━━━','🚨 XAUUSD MASTER PATTERN SIGNAL','━━━━━━━━━━━━━━━━━━━━',`Pattern: ${pattern}`,`Direction: ${s.direction}`,`Entry: ${s.entry}`,`SL: ${s.sl}`,`TP: ${s.tp}`,`RR: ${s.rrText||('1:'+s.rr)}`,`Timeframe: ${s.timeframe||'5M'}`,`Candle Time: ${s.candleTime||'N/A'}`,`Reason: ${s.reason||'N/A'}`,'━━━━━━━━━━━━━━━━━━━━'].join('\n');
 }
 async function masterScan(){
  const [d1,h1,m15,m5]=await Promise.all([getCandles('1day',300),getCandles('1h',500),getCandles('15min',500),getCandles('5min',1000)]);
