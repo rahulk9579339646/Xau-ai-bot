@@ -1535,16 +1535,16 @@ function mDetectCandles(c,atr,out){
  // Do not wait for another 5M candle to confirm Hammer / Hanging Man / Shooting Star.
  if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&downContext)
    mEmit(out,'CANDLE_HAMMER','BUY',c,atr,'Hammer formed and confirmed at the close of this 5M candle after bearish context');
- if(cu>=Math.max(cb*2,cr*.45)&&cd<=cr*.2&&cb<=cr*.4&&priorDown&&mBull(x)&&x.close>b.high)
-   mEmit(out,'CANDLE_INVERTED_HAMMER','BUY',c,atr,'Inverted-hammer candidate after bearish context; next closed candle breaks high');
+ if(up>=Math.max(body*2,range*.45)&&dn<=range*.2&&body<=range*.4&&downContext)
+   mEmit(out,'CANDLE_INVERTED_HAMMER','BUY',c,atr,'Inverted Hammer formed and confirmed at the close of this 5M candle after bearish context');
  if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&upContext)
    mEmit(out,'CANDLE_HANGING_MAN','SELL',c,atr,'Hanging Man formed and confirmed at the close of this 5M candle after bullish context');
  if(up>=Math.max(body*2,range*.45)&&dn<=range*.2&&body<=range*.4&&upContext)
    mEmit(out,'CANDLE_SHOOTING_STAR','SELL',c,atr,'Shooting Star formed and confirmed at the close of this 5M candle after bullish context');
- if(cd>=cr*.60&&cu<=cr*.15&&priorDown&&mBull(x)&&x.close>b.high)
-   mEmit(out,'CANDLE_BULLISH_PIN_BAR','BUY',c,atr,'Pin-bar candidate at bearish context; confirmed by close above candidate high');
- if(cu>=cr*.60&&cd<=cr*.15&&priorUp&&mBear(x)&&x.close<b.low)
-   mEmit(out,'CANDLE_BEARISH_PIN_BAR','SELL',c,atr,'Pin-bar candidate at bullish context; confirmed by close below candidate low');
+ if(dn>=range*.60&&up<=range*.15&&downContext)
+   mEmit(out,'CANDLE_BULLISH_PIN_BAR','BUY',c,atr,'Bullish pin bar formed at the close of this candle after bearish context');
+ if(up>=range*.60&&dn<=range*.15&&upContext)
+   mEmit(out,'CANDLE_BEARISH_PIN_BAR','SELL',c,atr,'Bearish pin bar formed at the close of this candle after bullish context');
  if(body>=range*.85&&mBull(x))mEmit(out,'CANDLE_BULLISH_MARUBOZU','BUY',c,atr,'Bull body >=85% of range');
  if(body>=range*.85&&mBear(x))mEmit(out,'CANDLE_BEARISH_MARUBOZU','SELL',c,atr,'Bear body >=85% of range');
  if(small&&up>=range*.2&&dn>=range*.2){
