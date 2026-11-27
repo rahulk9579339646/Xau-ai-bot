@@ -1536,14 +1536,14 @@ function mDetectCandles(c,atr,out){
  const priorEma=mEmaLast(c.slice(0,-2),20);
  const priorDown=priorEma!==null&&a.close<priorEma;
  const priorUp=priorEma!==null&&a.close>priorEma;
- if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&downContext&&mBull(x))
-   mEmit(out,'CANDLE_HAMMER','BUY',c,atr,'Hammer candle after bearish context; signal on the hammer candle close');
+ if(cd>=Math.max(cb*2,cr*.45)&&cu<=cr*.2&&cb<=cr*.4&&priorDown&&mBull(x)&&x.close>b.high)
+   mEmit(out,'CANDLE_HAMMER','BUY',c,atr,'Hammer candidate after bearish context; confirmed only by next closed candle breaking hammer high');
  if(cu>=Math.max(cb*2,cr*.45)&&cd<=cr*.2&&cb<=cr*.4&&priorDown&&mBull(x)&&x.close>b.high)
    mEmit(out,'CANDLE_INVERTED_HAMMER','BUY',c,atr,'Inverted-hammer candidate after bearish context; next closed candle breaks high');
- if(dn>=Math.max(body*2,range*.45)&&up<=range*.2&&body<=range*.4&&upContext&&mBear(x))
-   mEmit(out,'CANDLE_HANGING_MAN','SELL',c,atr,'Hanging Man candle after bullish context; signal on the pattern candle close');
- if(up>=Math.max(body*2,range*.45)&&dn<=range*.2&&body<=range*.4&&upContext&&mBear(x))
-   mEmit(out,'CANDLE_SHOOTING_STAR','SELL',c,atr,'Shooting Star candle after bullish context; signal on the pattern candle close');
+ if(cd>=Math.max(cb*2,cr*.45)&&cu<=cr*.2&&cb<=cr*.4&&priorUp&&mBear(x)&&x.close<b.low)
+   mEmit(out,'CANDLE_HANGING_MAN','SELL',c,atr,'Hanging-man candidate after bullish context; next closed candle breaks low');
+ if(cu>=Math.max(cb*2,cr*.45)&&cd<=cr*.2&&cb<=cr*.4&&priorUp&&mBear(x)&&x.close<b.low)
+   mEmit(out,'CANDLE_SHOOTING_STAR','SELL',c,atr,'Shooting-star candidate after bullish context; next closed candle breaks low');
  if(cd>=cr*.60&&cu<=cr*.15&&priorDown&&mBull(x)&&x.close>b.high)
    mEmit(out,'CANDLE_BULLISH_PIN_BAR','BUY',c,atr,'Pin-bar candidate at bearish context; confirmed by close above candidate high');
  if(cu>=cr*.60&&cd<=cr*.15&&priorUp&&mBear(x)&&x.close<b.low)
